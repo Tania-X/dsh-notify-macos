@@ -60,6 +60,7 @@ struct ShowRequest {
     let action: String?
     let path: String?
     let url: String?
+    let sessionId: String?
     let sound: Bool?
     let autoDismissSec: Double?
 }
@@ -73,19 +74,21 @@ final class NotificationCard: NSObject {
     let action: String
     let path: String?
     let url: String?
+    let sessionId: String?
     let window: NSWindow
     let view: CardView
 
     var onRemoved: ((NotificationCard) -> Void)?
     private var removing = false
 
-    init(number: Int, title: String, message: String, action: String, path: String?, url: String?, autoDismissSec: Double? = nil) {
+    init(number: Int, title: String, message: String, action: String, path: String?, url: String?, sessionId: String? = nil, autoDismissSec: Double? = nil) {
         self.number = number
         self.title = title
         self.message = message
         self.action = action
         self.path = path
         self.url = url
+        self.sessionId = sessionId
 
         let width: CGFloat = 340
         let height = CardView.heightFor(title: title, message: message, width: width)
@@ -133,6 +136,11 @@ final class NotificationCard: NSObject {
             if let url, let parsed = URL(string: url) {
                 NSWorkspace.shared.open(parsed)
             }
+        case "jump-web":
+            // Jump the browser to the finished conversation's completion point:
+            // point the GUI at the session (localStorage) and reload, which opens
+            // the session and auto-scrolls to the newest message (the "done" spot).
+            BrowserJumper.jump(url: url, sessionId: sessionId)
         default:
             break
         }
@@ -273,6 +281,149 @@ final class CardView: NSView {
     }
 }
 
+// MARK: - Browser jumping
+
+/// Drives the default browser to the DSH GUI and points it at one session.
+///
+/// Strategy: try scriptable browsers (Chrome first, then Safari) to set
+/// `localStorage["dsh.sessions.current"]` to the target session and reload the
+/// tab. The GUI reads that key on boot, opens the session, and — because the
+/// chat scroll anchor is in-memory only — scrolls to the newest message, which
+/// is exactly the "task done" spot. When no browser is scriptable (missing
+/// automation permission), it falls back to simply opening the GUI URL.
+enum BrowserJumper {
+    /// Escape a value as an AppleScript double-quoted string literal. The
+    /// embedded JavaScript uses single-quoted strings, so only the outer
+    /// AppleScript quoting needs escaping here.
+    private static func asString(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    /// Escape a value as a single-quoted JavaScript string literal (embedded
+    /// inside the AppleScript double-quoted string).
+    private static func jsString(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "\\", with: "\\\\")
+                   .replacingOccurrences(of: "'", with: "\\'") + "'"
+    }
+
+    /// The JavaScript that points the GUI at a session and reloads.
+    private static func jumpScript(sessionId: String) -> String {
+        "localStorage.setItem('dsh.sessions.current', JSON.stringify({sessionId: \(jsString(sessionId))})); location.reload();"
+    }
+
+    /// Run osascript with a script; returns true when it exited 0.
+    @discardableResult
+    private static func runOSAScript(_ script: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Whether the daemon may script the named browser (Automation permission
+    /// granted). A minimal `get version` Apple event needs no extra grants, so
+    /// this is a cheap permission probe.
+    static func canScript(_ appName: String) -> Bool {
+        let script = """
+        tell application \(asString(appName)) to get version
+        """
+        return runOSAScript(script)
+    }
+
+    /// Try Chrome: find or open the GUI tab, activate it, inject localStorage,
+    /// reload. Retries the JS injection once after a short settle (a freshly
+    /// opened tab may still be loading).
+    private static func tryChrome(url: String, sessionId: String) -> Bool {
+        let script = """
+        tell application "Google Chrome"
+          activate
+          set targetTab to missing value
+          repeat with w in windows
+            repeat with t in tabs of w
+              if URL of t starts with \(asString(url)) then
+                set targetTab to t
+                set active tab index of w to (index of t)
+                set index of w to 1
+                exit repeat
+              end if
+            end repeat
+            if targetTab is not missing value then exit repeat
+          end repeat
+          if targetTab is missing value then
+            open location \(asString(url))
+            set targetTab to active tab of front window
+          end if
+          execute targetTab javascript \(asString(jumpScript(sessionId: sessionId)))
+        end tell
+        """
+        if runOSAScript(script) { return true }
+        // Freshly-opened tab may still be loading: wait, then retry once.
+        Thread.sleep(forTimeInterval: 0.8)
+        return runOSAScript(script)
+    }
+
+    /// Try Safari: find or open the GUI tab, activate it, inject localStorage,
+    /// reload. Retries once after a short settle.
+    private static func trySafari(url: String, sessionId: String) -> Bool {
+        let script = """
+        tell application "Safari"
+          activate
+          set targetDoc to missing value
+          repeat with w in windows
+            repeat with t in tabs of w
+              if URL of t starts with \(asString(url)) then
+                set targetDoc to t
+                set current tab of w to t
+                set index of w to 1
+                exit repeat
+              end if
+            end repeat
+            if targetDoc is not missing value then exit repeat
+          end repeat
+          if targetDoc is missing value then
+            open location \(asString(url))
+            set targetDoc to front document
+          end if
+          do JavaScript \(asString(jumpScript(sessionId: sessionId))) in targetDoc
+        end tell
+        """
+        if runOSAScript(script) { return true }
+        Thread.sleep(forTimeInterval: 0.8)
+        return runOSAScript(script)
+    }
+
+    /// Open the GUI URL with the system `open` command (no scripting needed).
+    private static func fallbackOpen(url: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [url]
+        try? process.run()
+    }
+
+    /// Jump the browser to the GUI and the given session.
+    static func jump(url: String?, sessionId: String?) {
+        let guiUrl = (url?.isEmpty == false) ? url! : "http://127.0.0.1:3080"
+        guard let sessionId, !sessionId.isEmpty else {
+            // No session to target: just open the GUI.
+            if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
+            return
+        }
+        if tryChrome(url: guiUrl, sessionId: sessionId) { return }
+        if trySafari(url: guiUrl, sessionId: sessionId) { return }
+        // No scriptable browser: at least bring the GUI to the front.
+        fallbackOpen(url: guiUrl)
+    }
+}
+
 // MARK: - Card stack
 
 final class CardStack {
@@ -292,6 +443,7 @@ final class CardStack {
             action: action,
             path: request.path,
             url: request.url,
+            sessionId: request.sessionId,
             autoDismissSec: request.autoDismissSec
         )
         nextNumber += 1
@@ -411,6 +563,7 @@ final class SocketServer {
                 action: object["action"] as? String,
                 path: object["path"] as? String,
                 url: object["url"] as? String,
+                sessionId: object["sessionId"] as? String,
                 sound: object["sound"] as? Bool,
                 autoDismissSec: object["autoDismissSec"] as? Double
             )
@@ -419,6 +572,16 @@ final class SocketServer {
             }
         case "ping":
             let reply = "{\"ok\":true}\n"
+            reply.withCString { ptr in
+                _ = Darwin.write(currentClient, ptr, reply.count)
+            }
+        case "probe":
+            // Report browser automation permission state (used by the plugin's
+            // README and diagnostics to guide the user through the one-time
+            // macOS Automation + "Allow JavaScript from Apple Events" grants).
+            let chrome = BrowserJumper.canScript("Google Chrome")
+            let safari = BrowserJumper.canScript("Safari")
+            let reply = "{\"ok\":true,\"chrome\":\(chrome ? "true" : "false"),\"safari\":\(safari ? "true" : "false")}\n"
             reply.withCString { ptr in
                 _ = Darwin.write(currentClient, ptr, reply.count)
             }
