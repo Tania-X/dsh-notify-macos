@@ -61,6 +61,7 @@ struct ShowRequest {
     let path: String?
     let url: String?
     let sessionId: String?
+    let sessionTitle: String?
     let sound: Bool?
     let autoDismissSec: Double?
 }
@@ -75,13 +76,14 @@ final class NotificationCard: NSObject {
     let path: String?
     let url: String?
     let sessionId: String?
+    let sessionTitle: String?
     let window: NSWindow
     let view: CardView
 
     var onRemoved: ((NotificationCard) -> Void)?
     private var removing = false
 
-    init(number: Int, title: String, message: String, action: String, path: String?, url: String?, sessionId: String? = nil, autoDismissSec: Double? = nil) {
+    init(number: Int, title: String, message: String, action: String, path: String?, url: String?, sessionId: String? = nil, sessionTitle: String? = nil, autoDismissSec: Double? = nil) {
         self.number = number
         self.title = title
         self.message = message
@@ -89,6 +91,7 @@ final class NotificationCard: NSObject {
         self.path = path
         self.url = url
         self.sessionId = sessionId
+        self.sessionTitle = sessionTitle
 
         let width: CGFloat = 340
         let height = CardView.heightFor(title: title, message: message, width: width)
@@ -138,9 +141,9 @@ final class NotificationCard: NSObject {
             }
         case "jump-web":
             // Jump the browser to the finished conversation's completion point:
-            // point the GUI at the session (localStorage) and reload, which opens
-            // the session and auto-scrolls to the newest message (the "done" spot).
-            BrowserJumper.jump(url: url, sessionId: sessionId)
+            // first try an in-place session switch (click the sidebar row, no
+            // reload), falling back to localStorage + reload.
+            BrowserJumper.jump(url: url, sessionId: sessionId, sessionTitle: sessionTitle)
         default:
             break
         }
@@ -283,15 +286,27 @@ final class CardView: NSView {
 
 // MARK: - Browser jumping
 
-/// Drives the default browser to the DSH GUI and points it at one session.
+/// Drives the browser that hosts the DSH GUI and points it at one session.
 ///
-/// Strategy: try scriptable browsers (Chrome first, then Safari) to set
-/// `localStorage["dsh.sessions.current"]` to the target session and reload the
-/// tab. The GUI reads that key on boot, opens the session, and — because the
-/// chat scroll anchor is in-memory only — scrolls to the newest message, which
-/// is exactly the "task done" spot. When no browser is scriptable (missing
-/// automation permission), it falls back to simply opening the GUI URL.
+/// Strategy:
+///  1. Discover which browser already has the GUI open (Safari / Chrome /
+///     Edge / Brave / Arc / Opera / Firefox), and operate on THAT instance —
+///     never on a random browser.
+///  2. Inject JS that switches to the target session IN PLACE, without
+///     reloading: find the sidebar session row by its title and click it
+///     (the GUI then scrolls to that session's newest message, which is the
+///     "task done" spot). If the row is not found (e.g. collapsed group or
+///     stale title), fall back to setting `localStorage["dsh.sessions.current"]`
+///     and reloading — the GUI reopens the session and auto-scrolls to the
+///     newest message because the scroll anchor is in-memory only.
+///  3. When no scriptable browser is available, at least open the GUI URL.
 enum BrowserJumper {
+    /// Browsers probed in order; the first one with a GUI tab wins.
+    private static let browserCandidates = [
+        "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser",
+        "Arc", "Opera", "Firefox"
+    ]
+
     /// Escape a value as an AppleScript double-quoted string literal. The
     /// embedded JavaScript uses single-quoted strings, so only the outer
     /// AppleScript quoting needs escaping here.
@@ -307,9 +322,55 @@ enum BrowserJumper {
                    .replacingOccurrences(of: "'", with: "\\'") + "'"
     }
 
-    /// The JavaScript that points the GUI at a session and reloads.
-    private static func jumpScript(sessionId: String) -> String {
+    /// Fallback: set the persisted session and reload (the GUI reopens the
+    /// session and scrolls to its newest message).
+    private static func reloadScript(sessionId: String) -> String {
         "localStorage.setItem('dsh.sessions.current', JSON.stringify({sessionId: \(jsString(sessionId))})); location.reload();"
+    }
+
+    /// Preferred: switch to the session in place by clicking its sidebar row
+    /// (matched by exact title, then by contains), then scroll to the bottom.
+    /// Yields a JS expression that evaluates to `true` when a row was clicked.
+    private static func inPlaceScript(sessionTitle: String?) -> String {
+        let titleMatch: String
+        if let sessionTitle, !sessionTitle.isEmpty {
+            let exact = jsString(sessionTitle)
+            titleMatch = """
+            (function () {
+              var rows = Array.from(document.querySelectorAll('[role="treeitem"]'));
+              var pick = null;
+              for (var i = 0; i < rows.length; i++) {
+                var text = (rows[i].textContent || '').trim();
+                if (text === \(exact)) { pick = rows[i]; break; }
+              }
+              if (!pick) {
+                for (var j = 0; j < rows.length; j++) {
+                  var t = (rows[j].textContent || '').trim();
+                  if (t.indexOf(\(exact)) !== -1) { pick = rows[j]; break; }
+                }
+              }
+              if (pick) { pick.click(); return true; }
+              return false;
+            })()
+            """
+        } else {
+            titleMatch = "false"
+        }
+        return """
+        (function () {
+          var clicked = \(titleMatch);
+          if (!clicked) return false;
+          var scroller = document.querySelector('[data-dsh-scrollport], [class*="scroll"], main, [role="main"]');
+          if (scroller) {
+            var t = 0;
+            var id = setInterval(function () {
+              scroller.scrollTop = scroller.scrollHeight;
+              if (++t > 30) clearInterval(id);
+            }, 100);
+          }
+          return true;
+        })()
+        """
     }
 
     /// Run osascript with a script; returns true when it exited 0.
@@ -339,12 +400,15 @@ enum BrowserJumper {
         return runOSAScript(script)
     }
 
-    /// Try Chrome: find or open the GUI tab, activate it, inject localStorage,
-    /// reload. Retries the JS injection once after a short settle (a freshly
-    /// opened tab may still be loading).
-    private static func tryChrome(url: String, sessionId: String) -> Bool {
-        let script = """
-        tell application "Google Chrome"
+    /// A Chrome-family (Chromium) tab enumeration + injection script.
+    private static func chromiumScript(
+        appName: String, url: String, script: String, openIfMissing: Bool
+    ) -> String {
+        let openClause = openIfMissing
+            ? "open location \(asString(url))\n            set targetTab to active tab of front window"
+            : "set targetTab to missing value"
+        return """
+        tell application \(asString(appName))
           activate
           set targetTab to missing value
           repeat with w in windows
@@ -359,22 +423,23 @@ enum BrowserJumper {
             if targetTab is not missing value then exit repeat
           end repeat
           if targetTab is missing value then
-            open location \(asString(url))
-            set targetTab to active tab of front window
+            \(openClause)
           end if
-          execute targetTab javascript \(asString(jumpScript(sessionId: sessionId)))
+          if targetTab is not missing value then
+            execute targetTab javascript \(asString(script))
+          end if
         end tell
         """
-        if runOSAScript(script) { return true }
-        // Freshly-opened tab may still be loading: wait, then retry once.
-        Thread.sleep(forTimeInterval: 0.8)
-        return runOSAScript(script)
     }
 
-    /// Try Safari: find or open the GUI tab, activate it, inject localStorage,
-    /// reload. Retries once after a short settle.
-    private static func trySafari(url: String, sessionId: String) -> Bool {
-        let script = """
+    /// Safari tab enumeration + injection script.
+    private static func safariScript(
+        url: String, script: String, openIfMissing: Bool
+    ) -> String {
+        let openClause = openIfMissing
+            ? "open location \(asString(url))\n            set targetDoc to front document"
+            : "set targetDoc to missing value"
+        return """
         tell application "Safari"
           activate
           set targetDoc to missing value
@@ -390,15 +455,42 @@ enum BrowserJumper {
             if targetDoc is not missing value then exit repeat
           end repeat
           if targetDoc is missing value then
-            open location \(asString(url))
-            set targetDoc to front document
+            \(openClause)
           end if
-          do JavaScript \(asString(jumpScript(sessionId: sessionId))) in targetDoc
+          if targetDoc is not missing value then
+            do JavaScript \(asString(script)) in targetDoc
+          end if
         end tell
         """
-        if runOSAScript(script) { return true }
-        Thread.sleep(forTimeInterval: 0.8)
-        return runOSAScript(script)
+    }
+
+    /// Whether the app is Chromium-based (scriptable with tab enumeration).
+    private static func isChromium(_ appName: String) -> Bool {
+        appName != "Safari" && appName != "Firefox"
+    }
+
+    /// Find the browser that already hosts the GUI, else the first scriptable
+    /// candidate (openIfMissing=true), else nil.
+    private static func findHostingBrowser(url: String) -> (app: String, openIfMissing: Bool)? {
+        // First pass: a browser that ALREADY has the GUI tab open wins.
+        for app in browserCandidates where canScript(app) {
+            let probe: String
+            if app == "Safari" {
+                probe = safariScript(url: url, script: "1", openIfMissing: false)
+            } else if isChromium(app) {
+                probe = chromiumScript(appName: app, url: url, script: "1", openIfMissing: false)
+            } else {
+                continue
+            }
+            if runOSAScript(probe) { return (app, false) }
+        }
+        // Second pass: nothing hosts it; pick the first scriptable browser to
+        // open the GUI in.
+        for app in browserCandidates where canScript(app) {
+            if app == "Firefox" { continue }
+            return (app, true)
+        }
+        return nil
     }
 
     /// Open the GUI URL with the system `open` command (no scripting needed).
@@ -410,17 +502,35 @@ enum BrowserJumper {
     }
 
     /// Jump the browser to the GUI and the given session.
-    static func jump(url: String?, sessionId: String?) {
+    static func jump(url: String?, sessionId: String?, sessionTitle: String?) {
         let guiUrl = (url?.isEmpty == false) ? url! : "http://127.0.0.1:3080"
         guard let sessionId, !sessionId.isEmpty else {
             // No session to target: just open the GUI.
             if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
             return
         }
-        if tryChrome(url: guiUrl, sessionId: sessionId) { return }
-        if trySafari(url: guiUrl, sessionId: sessionId) { return }
-        // No scriptable browser: at least bring the GUI to the front.
-        fallbackOpen(url: guiUrl)
+        guard let target = findHostingBrowser(url: guiUrl) else {
+            // No scriptable browser at all: open the GUI with the default handler.
+            fallbackOpen(url: guiUrl)
+            return
+        }
+        let app = target.app
+        // Preferred in-place switch (no reload). If the sidebar row is not
+        // found, fall back to localStorage + reload inside the same tab.
+        let js = """
+        (function () {
+          var switched = \(inPlaceScript(sessionTitle: sessionTitle));
+          if (switched) { return; }
+          \(reloadScript(sessionId: sessionId))
+        })();
+        """
+        let script = app == "Safari"
+            ? safariScript(url: guiUrl, script: js, openIfMissing: target.openIfMissing)
+            : chromiumScript(appName: app, url: guiUrl, script: js, openIfMissing: target.openIfMissing)
+        if runOSAScript(script) { return }
+        // Freshly-opened tab may still be loading: wait, then retry once.
+        Thread.sleep(forTimeInterval: 0.8)
+        _ = runOSAScript(script)
     }
 }
 
@@ -444,6 +554,7 @@ final class CardStack {
             path: request.path,
             url: request.url,
             sessionId: request.sessionId,
+            sessionTitle: request.sessionTitle,
             autoDismissSec: request.autoDismissSec
         )
         nextNumber += 1
@@ -564,6 +675,7 @@ final class SocketServer {
                 path: object["path"] as? String,
                 url: object["url"] as? String,
                 sessionId: object["sessionId"] as? String,
+                sessionTitle: object["sessionTitle"] as? String,
                 sound: object["sound"] as? Bool,
                 autoDismissSec: object["autoDismissSec"] as? Double
             )
