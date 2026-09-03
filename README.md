@@ -141,3 +141,47 @@ Socket 协议（JSON Lines）：
 - 仅 macOS（插件按 `process.platform === "darwin"` 判断）。
 - 守护进程需 Swift 5.9+ 编译（已随包提供预编译二进制）。
 - 踩坑记录见 [docs/troubleshooting.md](docs/troubleshooting.md)。
+
+## 后续拓展（TODO feed）
+
+当前实现是"能跑的单体"，以下扩展点按价值排序，**等出现第二个消费者 / 跨平台需求时再逐个落地**，避免提前抽象：
+
+### 1. `BrowserDriver` 协议（最优先）
+现在 Safari 与 Chromium 家族（Chrome/Edge/Brave/Arc/Opera）的差异散落在 `probeScript` / `injectScript` 的 if/else 里。抽成协议后，浏览器列表变为驱动注册表，新浏览器只需注册一个驱动：
+
+```swift
+protocol BrowserDriver {
+    var displayName: String { get }
+    func findTab(matching url: String) -> Bool
+    func evaluateJavaScript(_ script: String) -> Result<String, Error>
+    func activate()
+}
+struct SafariDriver: BrowserDriver { ... }     // AppleScript "Safari" 方言
+struct ChromiumDriver: BrowserDriver { ... }   // 共享，仅 appName 参数化
+```
+
+### 2. `ScriptRunner`（进程/宿主抽象）
+现在硬编码 `/usr/bin/osascript`（`Process`）。同一跳转协议将来可跑在 `osascript -l JavaScript`（JXA）、进程内 `NSAppleScript`、或 **Firefox 的 DevTools Protocol**（Firefox 没有 AppleScript tab 注入，是当前唯一不支持的浏览器，RDP 是其出路）。抽协议后逻辑可 mock 可单测。
+
+### 3. `CompletionPresenter` 门面（渲染端策略化）
+渲染侧目前只有自绘悬浮卡片一种实现（+ 插件侧 osascript 兜底）。抽协议可支持 headless、日志模式、未来 Linux/Windows 通知：
+
+```swift
+protocol CompletionPresenter {
+    func present(_ request: ShowRequest)
+    func dismiss(id: String)
+}
+```
+`NSWindow`/`NSScreen` 调用集中在实现里——真正的"OS 扩展点"。
+
+### 4. 把 GUI 知识从守护进程剥离（协议演进方向）
+`inPlaceScript` 硬编码了 DSH 前端的 DOM 结构（`[role="treeitem"]`、`[data-conversation-scroll]`）。更干净的形态：**插件在 `show` 消息里下发跳转脚本/URL**，守护进程退化为纯执行器。好处：前端改版只改插件；守护进程可通用化服务其他 Harness。
+
+### 5. 协议层现代化
+- `show` 的 `cmd` 字段冗余（switch 后构造恒为 "show"）
+- 手拼 JSON 回复 → Codable 枚举 + 类型化回复
+- 增加协议 `version` 字段，支持平滑迁移
+
+### 6. 进程生命周期管理（守护进程探活）
+守护进程由插件 detached spawn，插件只在加载时 pre-warm 一次，不周期性探活。可加：守护进程心跳上报 / 插件定时 ping 失败自动重启 / 退出时清理 socket。
+
