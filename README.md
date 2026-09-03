@@ -142,6 +142,23 @@ Socket 协议（JSON Lines）：
 - 守护进程需 Swift 5.9+ 编译（已随包提供预编译二进制）。
 - 踩坑记录见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
+## 同类项目与社区参考
+
+本插件是独立开发的作品。联网调研确认社区已有多个功能相近的 DSH 通知插件，官方（deepseek-ai/deepseek-harness）暂未内置任务完成通知，但官方「一切皆插件」架构明确留白给社区。以下对比供后续迭代参考：
+
+| 项目 | 平台 | 通知形态 | 会话跳转 | 说明 |
+| --- | --- | --- | --- | --- |
+| 本插件 | macOS | 右上角自绘悬浮卡片（常驻/拖拽清除/品牌鲸鱼） | AppleScript 注入（localStorage + 侧边栏点击） | 不依赖改动前端即可跨会话跳转 |
+| [dsh-niao-message](https://github.com/dsh-niao/dsh-niao-message) | macOS | 系统通知中心横幅 | 点击直达应用（`open -a`） | 三大场景 + 回页面自动清空 + 防打扰 |
+| [TARS-snail/dsh-notify](https://github.com/TARS-snail/dsh-notify) | Linux/桌面 | 桌面通知 | — | **presence 检测**：仅用户离开会话时才通知 |
+| [dsh-notify-yimit](https://github.com/YiMlT/dsh-notify-yimit) | Windows | 系统通知 + WPF 自绘浮窗 | **URL hash 深链 + client half**（`#…/session=<id>` → `ctx.sessions.open`） | 与本品定位最接近；标题=会话名、多场景、常驻宿主 |
+| [hotpot-labs/dsh-notifier-plugin](https://github.com/hotpot-labs/dsh-notifier-plugin) | mac/win/linux | 浏览器 `Notification()` / Tauri | — | 轻量「只通知不交互」，多后端可插拔 |
+| [THEWOLFWALKER/dsh-notifier](https://github.com/THEWOLFWALKER/dsh-notifier) | 跨平台 | IM 推送 | — | 统一 `notify()` + 8 通道（telegram/bark/feishu…） |
+
+生态汇总清单：[awesome-deepseek-harness](https://github.com/Dominic789654/awesome-deepseek-harness) · [awesome-dsh-plugin](https://github.com/Anil-matcha/awesome-dsh-plugin) · [dshworks/awesome-dsh-plugins](https://github.com/dshworks/awesome-dsh-plugins)
+
+**最有价值的参考**：`dsh-notify-yimit` 的会话跳转走 **URL hash 深链 + 客户端 half**——由浏览器端监听 hash 后调用前端原生 `ctx.sessions.open(id)`。相比本品的 AppleScript 注入：无需 macOS 自动化权限、无需浏览器「Allow JavaScript from Apple Events」、天然无刷新、跨浏览器一致。代价是需要打包 `dsh.client` 客户端 half（社区插件已证明这是 DSH 一等公民机制）。若后续要"做正"跳转层，可优先吸收该方案，替换掉最脆弱的注入部分，同时保留本品的悬浮卡片形态。
+
 ## 后续拓展（TODO feed）
 
 当前实现是"能跑的单体"，以下扩展点按价值排序，**等出现第二个消费者 / 跨平台需求时再逐个落地**，避免提前抽象：
@@ -176,6 +193,8 @@ protocol CompletionPresenter {
 
 ### 4. 把 GUI 知识从守护进程剥离（协议演进方向）
 `inPlaceScript` 硬编码了 DSH 前端的 DOM 结构（`[role="treeitem"]`、`[data-conversation-scroll]`）。更干净的形态：**插件在 `show` 消息里下发跳转脚本/URL**，守护进程退化为纯执行器。好处：前端改版只改插件；守护进程可通用化服务其他 Harness。
+
+> **社区已验证的替代路径**：参考 [dsh-notify-yimit](https://github.com/YiMlT/dsh-notify-yimit) 的 **URL hash 深链 + client half** 方案——跳转由浏览器端监听 `#…/session=<id>` 后调用前端原生 `ctx.sessions.open(id)` 完成，守护进程完全不碰 DOM，也无需 macOS 自动化/浏览器 JS 授权。若重新设计跳转层，这是首选方向（详见上方「同类项目与社区参考」）。
 
 ### 5. 协议层现代化
 - `show` 的 `cmd` 字段冗余（switch 后构造恒为 "show"）

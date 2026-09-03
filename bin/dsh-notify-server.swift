@@ -695,7 +695,7 @@ final class CardStack {
         } else {
             title = "DeepSeek Harness"
         }
-        let message = request.message.flatMap { $0.isEmpty ? nil : $0 } ?? "任务完成，点击查看详情"
+        let message = request.message.flatMap { $0.isEmpty ? nil : $0 } ?? "任务已完成"
         let action = request.action ?? "open-folder"
         let card = NotificationCard(
             number: nextNumber,
