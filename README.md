@@ -1,49 +1,71 @@
 # dsh-notify-macos
 
-DeepSeek Harness 插件：每次对话/任务完成后，在 MacBook 屏幕右上角弹出**常驻悬浮通知卡片**，让你即使把浏览器切到后台也能第一时间知道任务已完成。
+DeepSeek Harness 插件：每次对话/任务完成后，在 MacBook 屏幕右上角弹出**常驻悬浮通知卡片**，点击卡片即可**跳转到完成该任务的会话**（跨 Session 精确跳转），让你即使切到后台也能第一时间回到任务现场。
 
-## 效果
+## 行为
 
-- 每个会话的对话轮次（turn）处理完毕时，弹出一张通知卡片，**悬停在右上角不自动消失**，直到你主动处理。
-- **卡片会一直停留**，除非你：
-  1. **将卡片向右拖拽** —— 直接清除它；
-  2. **点击卡片** —— 跳转到该任务完成的位置（浏览器打开 Web UI 并直接定位到该会话的「任务完成」消息处），同时清除它。
-- **多任务同时完成**：支持同时弹出多张卡片，每张带**递增编号**，互不遮挡、可分别处理。
-- 通知文案默认「任务已完成」，若会话已有标题则显示「任务已完成：<会话标题>」。
+- 每个会话的对话轮次处理完毕时（agent `running → idle`），弹出一张编号卡片，悬停在右上角，直到你处理。
+- **卡片标题 = 会话名**（如「DeepSeek插件任务完成提醒」），正文 = 「任务完成，点击查看详情」——一眼知道是哪个会话完成了。
+- **点击卡片** → 浏览器画面切到该会话并滚到最新消息（任务完成处），**无页面刷新**。
+- **向右拖拽卡片** → 直接清除。
+- **多任务同时完成**：多张卡片带递增编号堆叠，可分别处理。
 
-## 原理
-
-两个部分组成：
-
-1. **host 侧 Cordis 插件**（`lib/index.js`，Node.js 进程内）——监听 agent 作用域的 `agent/status` 事件，检测「running → idle」转换：
-   - agent 在收到你的消息后进入 `running`；
-   - 一个 agent 会保持 `running` 直到所有排队轮次全部处理完，才回到 `idle`；
-   - 因此 `running → idle` 恰好对应「一轮完整对话结束」，每次只触发一次通知。
-   - 检测到完成时，通过 **Unix domain socket**（`$TMPDIR/dsh-notify-macos.sock`）把事件（含会话 id）推给守护进程。
-
-2. **Swift/AppKit 守护进程**（`bin/dsh-notify-server`）——自绘右上角悬浮卡片：
-   - 原生 `osascript` 通知无法悬停/拖拽，所以用 AppKit 无边框窗口自绘，置顶于所有空间；
-   - 拖拽右移超过阈值 → 动画滑出并清除；
-   - 点击 → 执行跳转动作，然后清除；
-   - 卡片堆叠从右上角向下排列，每张带编号徽标；
-   - 插件首次使用时自动拉起守护进程（detached），之后常驻。
-
-**点击跳转（`jump-web`，默认）如何定位到「任务完成」处**：守护进程会先**找到承载 DeepSeek Harness Web UI 的那个浏览器实例**（在 Safari / Chrome / Edge / Brave / Arc / Opera / Firefox 中按「哪个浏览器已打开 GUI 标签页」来选，绝不在别的浏览器里另开窗口），然后注入一段 JS：
-
-1. **首选（不刷新、最细腻）**：遍历侧边栏的会话行（`role="treeitem"`），用会话标题精确/模糊匹配到目标会话并模拟点击 —— GUI 原地切换到该会话，并自动滚动到最新消息（「任务完成」处）。你正在看的会话 A 不会被打断，画面直接切到会话 B 的完成点。
-2. **回退**：若侧边栏里找不到该会话行（例如分组折叠、标题过期），则设置 `localStorage["dsh.sessions.current"]` 并刷新页面。Web UI 重新打开该会话，且滚动锚点是内存态的、刷新即清空，因此也会定位到最新消息。
-
-无论你当时在别的会话、别的页面还是别的应用里，画面都会被带过去。
-
-守护进程不可用时（例如二进制缺失），插件自动回退到 `osascript` 弹一次系统通知，保证任务完成不会被静默丢弃。
-
-## 安装（已完成）
-
-插件已安装到 web profile 并热加载（`cordis.patch.yml` 由 HMR 监听，改配置即时生效；改代码需将 `name` 的 `?v=` 版本号 +1 强制重载，或重启 `dsh web`）：
+## 消息链路
 
 ```
-$DSH_HOME/profiles/web/plugins/dsh-notify-macos/lib/index.js        # 插件
-$DSH_HOME/profiles/web/plugins/dsh-notify-macos/bin/dsh-notify-server   # Swift 守护进程
+DSH host (Node 进程)
+│
+│ 1. 插件监听 agent/status：running → idle 即一轮对话完成
+│
+│ 2. 插件经 Unix socket 向守护进程推送一条 show 指令
+│    └─ socket: $TMPDIR/dsh-notify-macos.sock
+│    └─ 载荷: { sessionId, sessionTitle, message, action:"jump-web" }
+│
+▼
+dsh-notify-server (Swift/AppKit 守护进程)
+│
+│ 3. 守护进程在屏幕右上角绘制编号悬浮卡片
+│    └─ 标题 = sessionTitle（会话名）；正文 = 完成文案
+│    └─ 卡片常驻，等待点击或右拖
+│
+│ 4. 用户点击卡片 → BrowserJumper 接管
+│
+▼
+浏览器 (Safari / Chrome / Edge / Brave / Arc / Opera / Firefox)
+│
+│ 5. 守护进程先探测哪个浏览器已打开 DSH Web UI（只枚举标签页，不执行 JS）
+│    └─ 只在承载 GUI 的那个浏览器实例内操作，绝不跳去别的浏览器
+│
+│ 6. 向 GUI 标签页注入 JS，优先“原地切换”：
+│    └─ 按 sessionTitle 精确/模糊匹配侧边栏会话行（role="treeitem"）
+│    └─ 匹配成功 → 模拟点击该行 → GUI 切到目标会话并滚到底部（无刷新）
+│
+│ 7. 边界回退（会话刚被删除/归档，行不可见）：
+│    └─ 清除持久化会话选择并刷新 → GUI 自动落到第一个可用 Session
+│    └─ 一个 Session 都没有 → GUI 显示空状态/新建会话视图
+│
+│ 8. 若 JS 注入被拒绝（浏览器未授权）：
+│    └─ 至少聚焦 GUI 标签页（open location 激活既有标签，不新开窗口）
+│    └─ 若没有可脚本化浏览器 → 用系统默认方式打开 GUI
+```
+
+## 组件
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| Cordis 插件 | `lib/index.js`（host 进程内） | 监听完成事件，经 socket 推送给守护进程 |
+| Swift 守护进程 | `bin/dsh-notify-server` | 自绘悬浮卡片；点击后控制浏览器跳转 |
+| Web profile 注册 | `$DSH_HOME/profiles/web/cordis.patch.yml` | 加载插件（HMR 热更新） |
+
+守护进程不可用时，插件回退到 `osascript` 弹一次系统通知，保证完成不被静默丢弃。
+
+## 安装
+
+插件已安装到 web profile 并热加载：
+
+```
+$DSH_HOME/profiles/web/plugins/dsh-notify-macos/lib/index.js
+$DSH_HOME/profiles/web/plugins/dsh-notify-macos/bin/dsh-notify-server
 $DSH_HOME/profiles/web/cordis.patch.yml   # notify-macos 条目
 ```
 
@@ -59,97 +81,63 @@ curl -s -X POST http://127.0.0.1:3080/api/pluginInventory/list \
 验证守护进程：
 
 ```bash
-ls -l $TMPDIR/dsh-notify-macos.sock   # 插件自动拉起后应存在
-echo '{"cmd":"ping"}' | nc -U $TMPDIR/dsh-notify-macos.sock  # 返回 {"ok":true}
+ls -l $TMPDIR/dsh-notify-macos.sock
+echo '{"cmd":"ping"}' | nc -U $TMPDIR/dsh-notify-macos.sock   # → {"ok":true}
 ```
 
 ## 配置
 
-在 `$DSH_HOME/profiles/web/cordis.patch.yml` 中修改 `notify-macos` 条目的 `config`：
+在 `cordis.patch.yml` 的 `notify-macos.config` 中修改：
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | 总开关 |
-| `title` | string | `"DeepSeek Harness"` | 卡片标题行 |
-| `message` | string | `"任务已完成"` | 卡片正文；含 `{title}` 时替换为会话标题 |
-| `sound` | boolean | `false` | 是否播放系统提示音（Glass） |
-| `rootOnly` | boolean | `true` | 仅顶层会话完成时通知；`false` 则子代理（subagent）完成也会通知（工作流大量扇出子代理时可能较吵） |
-| `clickAction` | string | `"jump-web"` | 点击卡片的行为：`jump-web`（浏览器打开 Web UI 并定位到该会话的「任务完成」处）/ `open-folder`（Finder 打开会话工作目录）/ `open-web`（仅打开 Web UI，不定位会话）/ `none`（仅清除） |
-| `webUrl` | string | `"http://127.0.0.1:3080"` | `clickAction: open-web / jump-web` 时打开的地址 |
-| `autoDismissSec` | number | `0` | 卡片自动消失秒数；`0`（默认）常驻直到你拖拽/点击 |
-| `socketPath` | string | `$TMPDIR/dsh-notify-macos.sock` | 守护进程 socket 路径 |
-| `serverPath` | string | 插件包内 `bin/dsh-notify-server` | 守护进程二进制路径 |
+| `title` | string | `"DeepSeek Harness"` | 无会话名时的兜底标题（正常显示会话名） |
+| `message` | string | `"任务完成，点击查看详情"` | 卡片正文 |
+| `sound` | boolean | `false` | 完成时是否播放提示音 |
+| `rootOnly` | boolean | `true` | 仅顶层会话完成时通知（`false` 则子代理完成也通知） |
+| `clickAction` | string | `"jump-web"` | 点击行为：`jump-web`（跳会话）/ `open-folder` / `open-web` / `none` |
+| `webUrl` | string | `"http://127.0.0.1:3080"` | Web UI 地址 |
+| `autoDismissSec` | number | `0` | 卡片自动消失秒数（`0` 常驻） |
+| `socketPath` | string | `$TMPDIR/dsh-notify-macos.sock` | 与守护进程通信的 socket |
+| `serverPath` | string | 插件包内 `bin/dsh-notify-server` | 守护进程路径 |
 
-示例：
+## 一次性授权
 
-```yaml
-- insert:
-    - id: notify-macos
-      name: ./plugins/dsh-notify-macos/lib/index.js?v=4
-      config:
-        enabled: true
-        title: DeepSeek Harness
-        message: 任务已完成：{title}
-        sound: true
-        rootOnly: true
-        clickAction: jump-web
-        autoDismissSec: 0
-```
+跨会话跳转依赖守护进程控制浏览器，需要两项一次性授权：
 
-## 一次性授权（点击跳转需要）
+1. **macOS 自动化**：首次点击卡片时系统弹窗「dsh-notify-server 想要控制 Google Chrome / Safari」→ 点**允许**。
+2. **浏览器允许 AppleScript 执行 JS**：
+   - Safari：设置 → 高级 → 开启「显示开发菜单」→ 开发 → 勾选「允许 JavaScript 从 Apple Events」
+   - Chrome：菜单 View → Developer → 勾选 **Allow JavaScript from Apple Events**
 
-`jump-web` 通过 AppleScript 控制浏览器，首次点击卡片时 macOS 会弹出自动化授权确认（「dsh-notify-server 想要控制 Google Chrome / Safari」），**点「允许」即可**，之后永久生效。若没有看到弹窗或跳转失效，请按浏览器处理：
-
-- **Chrome**：菜单 View → Developer → 勾选 **Allow JavaScript from Apple Events**。
-- **Safari**：需先在 设置 → 高级 开启「显示开发菜单」，然后 开发 → 勾选 **允许 JavaScript 从 Apple Events**。
-
-验证授权状态（守护进程会回复浏览器是否可脚本化）：
+验证授权：
 
 ```bash
 echo '{"cmd":"probe"}' | nc -U $TMPDIR/dsh-notify-macos.sock
-# 期望 {"ok":true,"chrome":true,"safari":true}
+# → {"ok":true,"chrome":true,"safari":true}
 ```
 
-即使未授权，点击也会退化为「打开 Web UI 标签页」（不会精确跳转会话）。
-
-## 卸载
-
-1. 删除 `cordis.patch.yml` 中的 `notify-macos` 条目（恢复为 `[]`）；
-2. 删除 `$DSH_HOME/profiles/web/plugins/dsh-notify-macos/` 目录；
-3. 结束守护进程：`pkill -f dsh-notify-server`；
-4. 删除 socket 文件：`rm -f $TMPDIR/dsh-notify-macos.sock`。
+未授权时点击会退化为「聚焦 GUI 标签页」（不精确跳会话）。
 
 ## 开发
 
-### 重新编译守护进程
-
 ```bash
 cd bin
-swiftc -O dsh-notify-server.swift -o dsh-notify-server
+swiftc -O dsh-notify-server.swift -o dsh-notify-server   # 重新编译守护进程
 ```
 
-### 协议（socket，JSON Lines）
+Socket 协议（JSON Lines）：
 
 | 命令 | 载荷 | 说明 |
 | --- | --- | --- |
-| `show` | `{title, message, action, path, url, sessionId, sound, autoDismissSec}` | 弹出一张卡片 |
-| `ping` | — | 存活探测，回复 `{"ok":true}` |
-| `probe` | — | 探测浏览器自动化授权，回复 `{"ok":true,"chrome":…,"safari":…}` |
-
-### 手动测试
-
-```bash
-./bin/dsh-notify-server /tmp/dsh-notify-test.sock &   # 启动守护进程
-python3 -c "
-import socket,json
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect('/tmp/dsh-notify-test.sock')
-s.sendall((json.dumps({'cmd':'show','title':'DeepSeek Harness','message':'测试卡片','action':'open-folder','path':'/Users/apple/dsh'})+'\n').encode())
-s.close()
-"
-```
+| `show` | `{sessionId, sessionTitle, title, message, action, url, sound, autoDismissSec}` | 弹卡片 |
+| `ping` | — | 存活探测 → `{"ok":true}` |
+| `probe` | — | 浏览器授权探测 → `{"ok":true,"chrome":…,"safari":…}` |
+| `debug` | `{url, sessionId, sessionTitle}` | 手动触发一次跳转（诊断用） |
 
 ## 平台要求
 
-- 仅 macOS（插件通过 `process.platform === "darwin"` 判断；其他平台记录 warn 并禁用）。
-- 守护进程需要 Swift 5.9+ 编译（本机已编译好二进制，无需额外工具链）。
-- 需要系统允许创建置顶悬浮窗口（无需特殊权限）。
+- 仅 macOS（插件按 `process.platform === "darwin"` 判断）。
+- 守护进程需 Swift 5.9+ 编译（已随包提供预编译二进制）。
+- 踩坑记录见 [docs/troubleshooting.md](docs/troubleshooting.md)。
