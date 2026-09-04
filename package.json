@@ -1,15 +1,25 @@
 {
   "name": "dsh-notify-macos",
-  "version": "0.1.0",
-  "description": "DSH host plugin: shows a native macOS notification (top-right corner) every time a conversation/turn completes",
+  "version": "0.2.0",
+  "description": "DSH plugin: persistent top-right floating cards on macOS; click jumps the browser to the finished conversation's session (client-half hash deep-link)",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "dsh": {
+    "client": {
+      "inject": [
+        "remote"
+      ],
+      "platform": "web"
+    }
+  },
   "files": [
-    "lib"
+    "lib",
+    "bin"
   ],
   "license": "MIT",
   "dependencies": {

@@ -21,6 +21,20 @@ import AppKit
 import Darwin
 import Foundation
 
+// MARK: - Diagnostics
+
+/// Append one diagnostic line to the daemon log.
+func dshLog(_ line: String) {
+    let path = "/tmp/dsh-notify-macos.log"
+    if let handle = FileHandle(forWritingAtPath: path) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+    } else {
+        try? Data(line.utf8).write(to: URL(fileURLWithPath: path))
+    }
+}
+
 // MARK: - Socket plumbing
 
 func fillSockaddr(_ path: String) -> sockaddr_un {
@@ -345,334 +359,53 @@ final class CardView: NSView {
     }
 }
 
-// MARK: - Browser jumping
+// MARK: - Session deep link
 
-/// Drives the browser that hosts the DSH GUI and points it at one session.
+/// Opens the DeepSeek Harness Web UI pointed at one session, using the
+/// frontend's own navigation instead of scripting the browser.
 ///
-/// Strategy:
-///  1. Discover which browser already has the GUI open (Safari / Chrome /
-///     Edge / Brave / Arc / Opera / Firefox), and operate on THAT instance —
-///     never on a random browser.
-///  2. Inject JS that switches to the target session IN PLACE, without
-///     reloading: find the sidebar session row by its title and click it
-///     (the GUI then scrolls to that session's newest message, which is the
-///     "task done" spot). If the row is not found (e.g. collapsed group or
-///     stale title), fall back to setting `localStorage["dsh.sessions.current"]`
-///     and reloading — the GUI reopens the session and auto-scrolls to the
-///     newest message because the scroll anchor is in-memory only.
-///  3. When no scriptable browser is available, at least open the GUI URL.
+/// The heavy lifting moved into the client half (lib/client.js): it listens
+/// for a `#dsh-notify-macos/session=<id>` hash and calls the GUI's native
+/// `sessions.open(id)` — no reload, no DOM poking. The daemon therefore only
+/// needs to open the URL with the system `open` command, which requires no
+/// macOS Automation permission and no browser "Allow JavaScript from Apple
+/// Events". Opening the same GUI URL in the hosting browser activates the
+/// existing tab; the hash then drives the switch. If the GUI isn't open yet,
+/// the browser loads it and the client half still handles the hash on boot.
 enum BrowserJumper {
-    /// Browsers probed in order; the first one with a GUI tab wins.
-    private static let browserCandidates = [
-        "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser",
-        "Arc", "Opera", "Firefox"
-    ]
+    /// Default GUI origin (the running web server's actual port when known).
+    static var guiBaseUrl: String = "http://127.0.0.1:3080"
 
-    /// Escape a value as an AppleScript double-quoted string literal. The
-    /// embedded JavaScript uses single-quoted strings, so only the outer
-    /// AppleScript quoting needs escaping here.
-    private static func asString(_ value: String) -> String {
-        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    /// The deep-link hash the client half listens for.
+    static func jumpURL(url: String?, sessionId: String) -> String {
+        let base = (url?.isEmpty == false) ? url! : guiBaseUrl
+        return "\(base)/#dsh-notify-macos/session=\(sessionId)"
     }
 
-    /// Escape a value as a single-quoted JavaScript string literal (embedded
-    /// inside the AppleScript double-quoted string).
-    private static func jsString(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "\\", with: "\\\\")
-                   .replacingOccurrences(of: "'", with: "\\'") + "'"
-    }
-
-    /// Fallback: set the persisted session and reload (the GUI reopens the
-    /// session and scrolls to its newest message).
-    /// Fallback when the target session is no longer reachable in the sidebar
-    /// (e.g. it was deleted or archived right after completing): clear the
-    /// persisted selection and reload, so the GUI falls back to its default —
-    /// the first available Session; when none exist the GUI shows its empty /
-    /// new-session state, which is the honest minimum we can do.
-    private static func clearSelectionAndReloadScript() -> String {
-        "localStorage.removeItem('dsh.sessions.current'); location.reload();"
-    }
-
-    /// Preferred: switch to the session in place by clicking its sidebar row
-    /// (matched by exact title, then by contains), then scroll the chat
-    /// scrollport to the bottom. The script returns a JSON diagnostic object
-    /// (`{switched, rows, matched, scroller}`) so failures can be read from the
-    /// daemon log instead of guessing.
-    private static func inPlaceScript(sessionTitle: String?) -> String {
-        let exact = (sessionTitle?.isEmpty == false) ? jsString(sessionTitle!) : "null"
-        return """
-        (function () {
-          var diag = { switched: false, rows: 0, matched: null, scroller: false };
-          var rows = Array.from(document.querySelectorAll('[role="treeitem"]'));
-          diag.rows = rows.length;
-          var pick = null;
-          var wanted = \(exact);
-          if (wanted !== null) {
-            for (var i = 0; i < rows.length; i++) {
-              var text = (rows[i].textContent || '').trim();
-              if (text === wanted) { pick = rows[i]; break; }
+    /// Jump: open the GUI URL carrying the session hash with the system
+    /// `open` command (activates the existing tab / opens the default
+    /// browser). Never script the browser — the client half navigates.
+    static func jump(url: String?, sessionId: String?, sessionTitle: String?) {
+        dshLog("[jump] start url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
+        guard let sessionId, !sessionId.isEmpty else {
+            // No session to target: just open the GUI.
+            if let parsed = URL(string: url?.isEmpty == false ? url! : guiBaseUrl) {
+                NSWorkspace.shared.open(parsed)
             }
-            if (!pick) {
-              for (var j = 0; j < rows.length; j++) {
-                var t = (rows[j].textContent || '').trim();
-                if (t.indexOf(wanted) !== -1) { pick = rows[j]; break; }
-              }
-            }
-          }
-          if (pick) {
-            diag.matched = (pick.textContent || '').trim().slice(0, 60);
-            pick.click();
-            diag.switched = true;
-            // Give React a moment to render the switched session, then scroll.
-            var scroller = document.querySelector('[data-conversation-scroll]');
-            if (!scroller) {
-              var el = document.querySelector('[role="main"], main');
-              while (el && el !== document.body) {
-                if (el.scrollHeight > el.clientHeight) { scroller = el; break; }
-                el = el.parentElement;
-              }
-            }
-            if (scroller) {
-              diag.scroller = true;
-              var t = 0;
-              var id = setInterval(function () {
-                scroller.scrollTop = scroller.scrollHeight;
-                if (++t > 40) clearInterval(id);
-              }, 150);
-            }
-          }
-          return JSON.stringify(diag);
-        })()
-        """
-    }
-
-    /// Run osascript and return its exit code, stdout and stderr.
-    /// Diagnostics (non-zero exit or non-empty stderr) are appended to a log
-    /// file so jump failures can be debugged on a live machine.
-    @discardableResult
-    private static func runOSAScript(_ script: String, label: String = "") -> (code: Int32, stdout: String, stderr: String) {
+            return
+        }
+        let target = jumpURL(url: url, sessionId: sessionId)
+        dshLog("[jump] opening \(target)\n")
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [target]
         do {
             try process.run()
             process.waitUntilExit()
-            let code = process.terminationStatus
-            let errText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let outText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            if code != 0 || !errText.isEmpty {
-                let line = "[osascript\(label.isEmpty ? "" : " " + label)] exit=\(code) err=\(errText.trimmingCharacters(in: .whitespacesAndNewlines)) out=\(outText.trimmingCharacters(in: .whitespacesAndNewlines))\n"
-                log(line)
-            }
-            return (code, outText, errText)
+            dshLog("[jump] open exit=\(process.terminationStatus)\n")
         } catch {
-            log("[osascript\(label.isEmpty ? "" : " " + label)] launch error: \(error)\n")
-            return (1, "", String(describing: error))
+            dshLog("[jump] open failed: \(error)\n")
         }
-    }
-
-    /// Append one diagnostic line to the daemon log.
-    static func log(_ line: String) {
-        let path = "/tmp/dsh-notify-macos.log"
-        if let handle = FileHandle(forWritingAtPath: path) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? Data(line.utf8).write(to: URL(fileURLWithPath: path))
-        }
-    }
-
-    /// Whether the daemon may script the named browser (Automation permission
-    /// granted). A minimal `get version` Apple event needs no extra grants, so
-    /// this is a cheap permission probe.
-    static func canScript(_ appName: String) -> Bool {
-        let script = """
-        tell application \(asString(appName)) to get version
-        """
-        return runOSAScript(script).code == 0
-    }
-
-    /// Pure enumeration probe: reports whether the browser has a GUI tab by
-    /// raising `error "dsh-no-tab"` (non-zero exit) when none matches. It does
-    /// NOT execute JavaScript, so it works even before the user grants the
-    /// "Allow JavaScript from Apple Events" browser setting — we only need tab
-    /// enumeration to locate the hosting browser.
-    private static func probeScript(appName: String, url: String) -> String {
-        if appName == "Safari" {
-            return """
-            tell application "Safari"
-              set found to false
-              repeat with w in windows
-                repeat with t in tabs of w
-                  if URL of t starts with \(asString(url)) then
-                    set found to true
-                    set current tab of w to t
-                    set index of w to 1
-                    exit repeat
-                  end if
-                end repeat
-                if found then exit repeat
-              end repeat
-              if not found then error "dsh-no-tab"
-            end tell
-            """
-        }
-        return """
-        tell application \(asString(appName))
-          set found to false
-          repeat with w in windows
-            repeat with t in tabs of w
-              if URL of t starts with \(asString(url)) then
-                set found to true
-                set active tab index of w to (index of t)
-                set index of w to 1
-                exit repeat
-              end if
-            end repeat
-            if found then exit repeat
-          end repeat
-          if not found then error "dsh-no-tab"
-        end tell
-        """
-    }
-
-    /// Inject a script into the GUI tab of the given browser. `openIfMissing`
-    /// opens the GUI in that browser first when no tab exists.
-    private static func injectScript(
-        appName: String, url: String, script: String, openIfMissing: Bool
-    ) -> String {
-        if appName == "Safari" {
-            let resolve = openIfMissing
-                ? "open location \(asString(url))\n            set targetDoc to front document"
-                : "error \"dsh-no-tab\""
-            return """
-            tell application "Safari"
-              activate
-              set targetDoc to missing value
-              repeat with w in windows
-                repeat with t in tabs of w
-                  if URL of t starts with \(asString(url)) then
-                    set targetDoc to t
-                    set current tab of w to t
-                    set index of w to 1
-                    exit repeat
-                  end if
-                end repeat
-                if targetDoc is not missing value then exit repeat
-              end repeat
-              if targetDoc is missing value then
-                \(resolve)
-              end if
-              do JavaScript \(asString(script)) in targetDoc
-            end tell
-            """
-        }
-        let resolve = openIfMissing
-            ? "open location \(asString(url))\n            set targetTab to active tab of front window"
-            : "error \"dsh-no-tab\""
-        return """
-        tell application \(asString(appName))
-          activate
-          set targetTab to missing value
-          repeat with w in windows
-            repeat with t in tabs of w
-              if URL of t starts with \(asString(url)) then
-                set targetTab to t
-                set active tab index of w to (index of t)
-                set index of w to 1
-                exit repeat
-              end if
-            end repeat
-            if targetTab is not missing value then exit repeat
-          end repeat
-          if targetTab is missing value then
-            \(resolve)
-          end if
-          execute targetTab javascript \(asString(script))
-        end tell
-        """
-    }
-
-    /// Find the browser that already hosts the GUI (enumeration only, no JS).
-    /// Returns the app name, or nil when no scriptable browser hosts it.
-    private static func findHostingBrowser(url: String) -> String? {
-        log("[jump] probing browsers for tab: \(url)\n")
-        for app in browserCandidates where canScript(app) {
-            log("[jump]   probing \(app)...\n")
-            if runOSAScript(probeScript(appName: app, url: url), label: "probe-\(app)").code == 0 {
-                log("[jump]   -> \(app) hosts the GUI\n")
-                return app
-            }
-            log("[jump]   -> \(app) does NOT host it\n")
-        }
-        return nil
-    }
-
-    /// Jump the browser to the GUI and the given session, staying inside the
-    /// browser that hosts the GUI the whole time.
-    static func jump(url: String?, sessionId: String?, sessionTitle: String?) {
-        let guiUrl = (url?.isEmpty == false) ? url! : "http://127.0.0.1:3080"
-        log("[jump] start url=\(guiUrl) sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
-        guard let sessionId, !sessionId.isEmpty else {
-            // No session to target: just open the GUI.
-            if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
-            return
-        }
-        // 1) Find the hosting browser (enumeration only — no JS needed).
-        guard let app = findHostingBrowser(url: guiUrl) else {
-            // No scriptable browser hosts the GUI. Open the GUI with the
-            // system default handler (last resort).
-            log("[jump] no scriptable browser hosts the GUI; opening with default handler\n")
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            process.arguments = [guiUrl]
-            try? process.run()
-            return
-        }
-        // 2) Inject the in-place switch + scroll; the injected script returns a
-        //    JSON diagnostic that osascript prints to stdout, which we capture
-        //    and log. If the target session's sidebar row is not found (it may
-        //    have been deleted/archived right after completing), clear the
-        //    persisted selection and reload inside the SAME browser/tab: the
-        //    GUI then opens its first available Session, or its empty state if
-        //    there are none.
-        let js = """
-        (function () {
-          var diag = \(inPlaceScript(sessionTitle: sessionTitle));
-          if (diag && JSON.parse(diag).switched) { return diag; }
-          \(clearSelectionAndReloadScript())
-          return diag;
-        })();
-        """
-        let injected = injectScript(
-            appName: app, url: guiUrl, script: js, openIfMissing: false
-        )
-        let injectedResult = runOSAScript(injected, label: "inject-\(app)")
-        if injectedResult.code == 0 {
-            log("[jump] injected in \(app) -> \(injectedResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))\n")
-            return
-        }
-        // 3) The tab exists but JS injection failed (missing "Allow JavaScript
-        //    from Apple Events"): retry once after a settle, then at minimum
-        //    focus the GUI tab in the hosting browser (open location activates
-        //    the existing tab without reloading).
-        Thread.sleep(forTimeInterval: 0.8)
-        let retried = runOSAScript(injected, label: "inject-\(app)-retry")
-        if retried.code == 0 {
-            log("[jump] injected (retry) in \(app) -> \(retried.stdout.trimmingCharacters(in: .whitespacesAndNewlines))\n")
-            return
-        }
-        let focus = injectScript(
-            appName: app, url: guiUrl, script: "1", openIfMissing: false
-        )
-        _ = runOSAScript(focus, label: "focus-\(app)")
-        log("[jump] injection failed; focused \(app) only\n")
     }
 }
 
@@ -852,12 +585,10 @@ final class SocketServer {
         case "ping":
             reply("{\"ok\":true}\n")
         case "probe":
-            // Report browser automation permission state (used by the plugin's
-            // README and diagnostics to guide the user through the one-time
-            // macOS Automation + "Allow JavaScript from Apple Events" grants).
-            let chrome = BrowserJumper.canScript("Google Chrome")
-            let safari = BrowserJumper.canScript("Safari")
-            reply("{\"ok\":true,\"chrome\":\(chrome ? "true" : "false"),\"safari\":\(safari ? "true" : "false")}\n")
+            // Health check: the daemon is up. (Browser automation probing was
+            // removed — session jumps now use a hash deep link opened with the
+            // system `open` command, needing no browser scripting permission.)
+            reply("{\"ok\":true,\"daemon\":true}\n")
         case "debug":
             // On-demand diagnostic: run a full jump (as if a card was clicked)
             // and reply when it settles. Payload: {url, sessionId, sessionTitle}.
