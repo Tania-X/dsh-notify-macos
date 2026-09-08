@@ -361,20 +361,158 @@ final class CardView: NSView {
 
 // MARK: - Session deep link
 
-/// Opens the DeepSeek Harness Web UI pointed at one session, using the
-/// frontend's own navigation instead of scripting the browser.
+/// Opens the DeepSeek Harness Web UI pointed at one session.
 ///
-/// The heavy lifting moved into the client half (lib/client.js): it listens
-/// for a `#dsh-notify-macos/session=<id>` hash and calls the GUI's native
-/// `sessions.open(id)` — no reload, no DOM poking. The daemon therefore only
-/// needs to open the URL with the system `open` command, which requires no
-/// macOS Automation permission and no browser "Allow JavaScript from Apple
-/// Events". Opening the same GUI URL in the hosting browser activates the
-/// existing tab; the hash then drives the switch. If the GUI isn't open yet,
-/// the browser loads it and the client half still handles the hash on boot.
+/// Two layers:
+///  1. Client half (lib/client.js) owns navigation: it listens for a
+///     `#dsh-notify-macos/session=<id>` hash and calls the GUI's native
+///     `sessions.open(id)` — no reload, no DOM poking, no browser JS
+///     permission. This is the part that actually switches the session.
+///  2. This daemon only has to make the hosting browser tab reach that hash.
+///     It enumerates browsers (Safari / Chromium family) via AppleScript,
+///     finds the tab already showing the GUI URL — on ANY Space/desktop —
+///     and navigates THAT tab to the hashed URL. Navigating an existing tab
+///     (set URL / open location) needs only the macOS Automation grant the
+///     user already approved; it does NOT need "Allow JavaScript from Apple
+///     Events". When no browser hosts the GUI, it falls back to the system
+///     `open` command (the GUI loads and the client half still handles the
+///     hash on boot).
 enum BrowserJumper {
     /// Default GUI origin (the running web server's actual port when known).
     static var guiBaseUrl: String = "http://127.0.0.1:3080"
+
+    /// Browsers probed in order; the first one hosting the GUI tab wins.
+    private static let browserCandidates = [
+        "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser",
+        "Arc", "Opera"
+    ]
+
+    /// Escape a value as an AppleScript double-quoted string literal.
+    private static func asString(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    /// Run osascript with a script; returns its exit code, stdout, stderr.
+    @discardableResult
+    private static func runOSAScript(
+        _ script: String, label: String = ""
+    ) -> (code: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let code = process.terminationStatus
+            let errText = String(
+                data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
+            ) ?? ""
+            let outText = String(
+                data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
+            ) ?? ""
+            if code != 0 || !errText.isEmpty {
+                dshLog(
+                    "[osascript\(label.isEmpty ? "" : " " + label)] exit=\(code) err=\(errText.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+                )
+            }
+            return (code, outText, errText)
+        } catch {
+            dshLog("[osascript\(label.isEmpty ? "" : " " + label)] launch error: \(error)\n")
+            return (1, "", String(describing: error))
+        }
+    }
+
+    /// Whether the daemon may script the named browser (macOS Automation
+    /// granted). A minimal `get version` needs no extra grants.
+    private static func canScript(_ appName: String) -> Bool {
+        runOSAScript(
+            "tell application \(asString(appName)) to get version",
+            label: "canScript-\(appName)"
+        ).code == 0
+    }
+
+    /// Find and navigate the tab that already shows `url` to `targetURL`.
+    /// Safari and Chromium use different dialects; returns true on success.
+    /// Only tab enumeration + navigation — no `execute javascript`, so the
+    /// browser-side "Allow JavaScript from Apple Events" setting is NOT
+    /// required (macOS Automation permission alone suffices).
+    private static func navigateHostingTab(
+        appName: String, guiUrl: String, targetURL: String
+    ) -> Bool {
+        if appName == "Safari" {
+            let script = """
+            tell application "Safari"
+              set targetTab to missing value
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if URL of t starts with \(asString(guiUrl)) then
+                    set targetTab to t
+                    exit repeat
+                  end if
+                end repeat
+                if targetTab is not missing value then exit repeat
+              end repeat
+              if targetTab is not missing value then
+                set URL of targetTab to \(asString(targetURL))
+                set current tab of (first window whose tabs contains targetTab) to targetTab
+                set index of (first window whose tabs contains targetTab) to 1
+                activate
+              else
+                error "dsh-no-tab"
+              end if
+            end tell
+            """
+            return runOSAScript(script, label: "navigate-\(appName)").code == 0
+        }
+        // Chromium family (Chrome/Edge/Brave/Arc/Opera share this dialect).
+        // Note: Chromium's `tab.URL` is read-only in its AppleScript dictionary,
+        // so navigation goes through `execute javascript` (needs the browser's
+        // "Allow JavaScript from Apple Events") or `open location`. Try `set URL`
+        // first (harmless if supported), then JS, then open-location in the
+        // hosting window.
+        let enumScript = """
+        tell application \(asString(appName))
+          set targetTab to missing value
+          repeat with w in windows
+            repeat with t in tabs of w
+              if URL of t starts with \(asString(guiUrl)) then
+                set targetTab to t
+                exit repeat
+              end if
+            end repeat
+            if targetTab is not missing value then exit repeat
+          end repeat
+          if targetTab is missing value then error "dsh-no-tab"
+          set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
+          set index of (first window whose tabs contains targetTab) to 1
+          activate
+          return index of targetTab
+        end tell
+        """
+        let result = runOSAScript(enumScript, label: "enum-\(appName)")
+        guard result.code == 0 else { return false }
+        // Tab found and focused. Navigate it to the hashed URL.
+        let js = "location.href = \(asString(targetURL));"
+        let navScript = """
+        tell application \(asString(appName))
+          set targetTab to active tab of front window
+          execute targetTab javascript \(asString(js))
+        end tell
+        """
+        if runOSAScript(navScript, label: "navjs-\(appName)").code == 0 { return true }
+        // JS injection unavailable — fall back to open location (front window now hosts the GUI).
+        let openScript = """
+        tell application \(asString(appName))
+          open location \(asString(targetURL))
+        end tell
+        """
+        return runOSAScript(openScript, label: "navopen-\(appName)").code == 0
+    }
 
     /// The deep-link hash the client half listens for.
     static func jumpURL(url: String?, sessionId: String) -> String {
@@ -382,20 +520,31 @@ enum BrowserJumper {
         return "\(base)/#dsh-notify-macos/session=\(sessionId)"
     }
 
-    /// Jump: open the GUI URL carrying the session hash with the system
-    /// `open` command (activates the existing tab / opens the default
-    /// browser). Never script the browser — the client half navigates.
+    /// Jump: point the hosting browser tab at the hashed GUI URL so the
+    /// client half switches sessions in place; fall back to `open` when no
+    /// browser hosts the GUI yet.
     static func jump(url: String?, sessionId: String?, sessionTitle: String?) {
         dshLog("[jump] start url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
+        let guiUrl = (url?.isEmpty == false) ? url! : guiBaseUrl
         guard let sessionId, !sessionId.isEmpty else {
-            // No session to target: just open the GUI.
-            if let parsed = URL(string: url?.isEmpty == false ? url! : guiBaseUrl) {
-                NSWorkspace.shared.open(parsed)
-            }
+            if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
             return
         }
         let target = jumpURL(url: url, sessionId: sessionId)
-        dshLog("[jump] opening \(target)\n")
+        dshLog("[jump] target=\(target)\n")
+
+        // 1) Hosting-tab navigation (precise: correct browser, correct Space).
+        for app in browserCandidates where canScript(app) {
+            dshLog("[jump] probing \(app)\n")
+            if navigateHostingTab(appName: app, guiUrl: guiUrl, targetURL: target) {
+                dshLog("[jump] navigated tab in \(app)\n")
+                return
+            }
+            dshLog("[jump]   \(app) does not host the GUI\n")
+        }
+
+        // 2) Fallback: system open (GUI loads; client half handles the hash on boot).
+        dshLog("[jump] no hosting tab found; falling back to open\n")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = [target]
