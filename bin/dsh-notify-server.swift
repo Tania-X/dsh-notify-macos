@@ -71,6 +71,10 @@ struct ShowRequest {
     let cmd: String
     let title: String?
     let message: String?
+    /// Outcome kind: "completed" | "error" | "blocked" (default completed).
+    let kind: String?
+    /// Structured detail for error/blocked (error message / tool name).
+    let detail: String?
     let action: String?
     let path: String?
     let url: String?
@@ -83,9 +87,41 @@ struct ShowRequest {
 // MARK: - Completion entry & aggregated card
 
 /// One completion occurrence inside an aggregated session card.
+/// Outcome kind of one completion, with its UI accent color.
+enum OutcomeKind: String {
+    case completed, error, blocked
+
+    /// Parse a wire kind string; anything unknown degrades to completed.
+    static func parse(_ raw: String?) -> OutcomeKind {
+        switch raw {
+        case "error": return .error
+        case "blocked": return .blocked
+        default: return .completed
+        }
+    }
+
+    /// Left accent bar / status dot color (on the dark card).
+    var color: NSColor {
+        switch self {
+        case .completed: return NSColor(calibratedRed: 0.35, green: 0.85, blue: 0.55, alpha: 1)   // soft green
+        case .error:     return NSColor(calibratedRed: 0.95, green: 0.30, blue: 0.30, alpha: 1)   // red
+        case .blocked:   return NSColor(calibratedRed: 0.95, green: 0.75, blue: 0.25, alpha: 1)   // amber
+        }
+    }
+
+    /// Dimmed variant for the aggregated summary line.
+    var dimColor: NSColor {
+        return color.withAlphaComponent(0.9)
+    }
+}
+
+/// One completion occurrence inside an aggregated session card.
 struct CompletionEntry {
     let message: String
     let time: Date
+    let kind: OutcomeKind
+    /// Structured detail (error message / tool name) when present.
+    let detail: String?
     /// Sequential index within this card (1-based, newest = last).
     let index: Int
 }
@@ -151,8 +187,8 @@ final class NotificationCard: NSObject {
     /// Append one completion, merging into this card. Recomputes the frame
     /// for collapsed/expanded height. Returns the entry index (1-based).
     @discardableResult
-    func addCompletion(message: String, at time: Date = Date()) -> Int {
-        entries.append(CompletionEntry(message: message, time: time, index: entries.count + 1))
+    func addCompletion(message: String, kind: OutcomeKind, detail: String?, at time: Date = Date()) -> Int {
+        entries.append(CompletionEntry(message: message, time: time, kind: kind, detail: detail, index: entries.count + 1))
         updateFrame()
         return entries.count
     }
@@ -162,14 +198,63 @@ final class NotificationCard: NSObject {
 
     var isCollapsed: Bool { !expanded }
 
-    /// Body copy under the title: single completion shows its message;
-    /// aggregated shows "已完成 N 次 · 最近 hh:mm".
+    /// Whether the card contains any entry of the given kind.
+    func contains(kind: OutcomeKind) -> Bool {
+        entries.contains { $0.kind == kind }
+    }
+
+    /// The card's dominant kind = the HIGHEST-priority kind present
+    /// (blocked > error > completed). The header accent follows this, so a
+    /// card with any failure/attention item is never shown as plain green.
+    var dominantKind: OutcomeKind {
+        if contains(kind: .blocked) { return .blocked }
+        if contains(kind: .error) { return .error }
+        return .completed
+    }
+
+    /// Remove one completion by its 1-based arrival index. Returns the
+    /// removed entry, or nil when the index is out of range.
+    @discardableResult
+    func removeCompletion(index: Int) -> CompletionEntry? {
+        guard index >= 1, index <= entries.count else { return nil }
+        let removed = entries.remove(at: index - 1)
+        // Reindex the remaining entries so row indices stay contiguous.
+        for (i, entry) in entries.enumerated() {
+            entries[i] = CompletionEntry(
+                message: entry.message, time: entry.time,
+                kind: entry.kind, detail: entry.detail, index: i + 1
+            )
+        }
+        if entries.count <= 1 { expanded = false }  // auto-collapse to single
+        updateFrame()
+        return removed
+    }
+
+    /// Body copy under the title, reflecting the card's composition:
+    ///   single            -> the entry's message (plus detail when present)
+    ///   all completed     -> "已完成 N 次 · 最近 hh:mm"
+    ///   has error(s)      -> "N 次中 M 次失败 · 最近 hh:mm"
+    ///   has blocked       -> "N 次中 B 次需你处理 · 最近 hh:mm"  (blocked wins copy)
     var summaryLine: String {
         guard let newest = newestEntry else { return "" }
-        if entries.count == 1 { return newest.message }
+        if entries.count == 1 {
+            if let detail = newest.detail, !detail.isEmpty {
+                return "\(newest.message) · \(detail)"
+            }
+            return newest.message
+        }
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
-        return "已完成 \(entries.count) 次 · 最近 \(formatter.string(from: newest.time))"
+        let time = formatter.string(from: newest.time)
+        let errorCount = entries.filter { $0.kind == .error }.count
+        let blockedCount = entries.filter { $0.kind == .blocked }.count
+        if blockedCount > 0 {
+            return "\(entries.count) 次中 \(blockedCount) 次需你处理 · 最近 \(time)"
+        }
+        if errorCount > 0 {
+            return "\(entries.count) 次中 \(errorCount) 次失败 · 最近 \(time)"
+        }
+        return "已完成 \(entries.count) 次 · 最近 \(time)"
     }
 
     // MARK: Expand / collapse
@@ -208,8 +293,11 @@ final class NotificationCard: NSObject {
 
     // MARK: Actions
 
-    /// Perform the click action (jump to the completion location).
-    func performAction() {
+    /// Perform the click action (jump to the completion location). When
+    /// `focusOnly` is true (the completion was BLOCKED, i.e. it is waiting on
+    /// the user — the approval/ask UI is already open in the GUI tab) the
+    /// browser is only brought to the front, never navigated.
+    func performAction(focusOnly: Bool = false) {
         switch action {
         case "open-folder":
             if let path, !path.isEmpty {
@@ -223,7 +311,10 @@ final class NotificationCard: NSObject {
             // Jump the browser to the finished conversation's completion point.
             // (Position-indexed jumps are a later iteration; for now every row
             // targets the session's newest message.)
-            BrowserJumper.jump(url: url, sessionId: sessionId, sessionTitle: sessionTitle)
+            BrowserJumper.jump(
+                url: url, sessionId: sessionId, sessionTitle: sessionTitle,
+                focusOnly: focusOnly
+            )
         default:
             break
         }
@@ -336,6 +427,12 @@ final class CardView: NSView {
         NSColor(calibratedWhite: 0.12, alpha: 0.95).setFill()
         panel.fill()
 
+        // Left accent bar in the card's dominant outcome color.
+        let accent = card.dominantKind.color
+        let bar = NSBezierPath(roundedRect: NSRect(x: 3, y: 6, width: 3.5, height: bounds.height - 12), xRadius: 1.75, yRadius: 1.75)
+        accent.setFill()
+        bar.fill()
+
         let multi = card.completionCount > 1
         // Header occupies the TOP headerHeight points of the view (whether
         // collapsed or expanded); everything below it is detail rows.
@@ -408,12 +505,18 @@ final class CardView: NSView {
                     line.lineWidth = 1
                     line.stroke()
                 }
+                // Per-row status dot (left of the message).
+                let dotSize: CGFloat = 6
+                let dot = NSBezierPath(ovalIn: NSRect(x: 24, y: rowRect.minY + (rowRect.height - dotSize) / 2, width: dotSize, height: dotSize))
+                entry.kind.color.setFill()
+                dot.fill()
                 let rowAttrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.systemFont(ofSize: 12),
                     .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 1)
                 ]
-                (entry.message as NSString).draw(
-                    in: NSRect(x: 46, y: rowRect.minY + 7, width: w - 120, height: 16),
+                let rowText = entry.detail.map { "\(entry.message) · \($0)" } ?? entry.message
+                (rowText as NSString).draw(
+                    in: NSRect(x: 38, y: rowRect.minY + 7, width: w - 128, height: 16),
                     withAttributes: rowAttrs
                 )
                 let timeAttrs: [NSAttributedString.Key: Any] = [
@@ -471,12 +574,11 @@ final class CardView: NSView {
             card.dismiss()
         } else if !dragged {
             if card.completionCount > 1 {
-                // Aggregated card (>= 2 completions): header click toggles
-                // expand/collapse; only a detail row click jumps + clears.
-                // This keeps an accidental header click from dismissing the
-                // whole card.
-                if let _ = rowIndex(at: point) {
-                    jumpAndDismiss(card)
+                // Aggregated card (>= 2): header click only toggles
+                // expand/collapse; a detail row click jumps AND removes that
+                // row — the card stays until every row is handled.
+                if let row = rowIndex(at: point) {
+                    jumpAndRemoveRow(card, row: row)
                 } else {
                     card.toggleExpanded()
                 }
@@ -496,16 +598,49 @@ final class CardView: NSView {
     }
 
     /// Run the card action (jump), then dismiss. Browser driving can block
-    /// briefly, so dispatch off the main thread and clear immediately.
+    /// briefly, so dispatch off the main thread and clear immediately. A
+    /// single-completion card whose outcome is BLOCKED only focuses the GUI
+    /// (its approval/ask UI is already open there) — it is dismissed either
+    /// way, because the user is about to answer in the GUI.
     private func jumpAndDismiss(_ card: NotificationCard) {
-        let action = card.action
-        let jump = { card.performAction() }
-        if action == "jump-web" {
-            DispatchQueue.global(qos: .userInitiated).async(execute: jump)
-        } else {
-            jump()
-        }
+        let focusOnly = card.entries.first?.kind == .blocked
+        jump(card, focusOnly: focusOnly)
         card.dismiss()
+    }
+
+    /// Jump to one row's completion, then remove that row. When the last row
+    /// is removed the card dismisses itself (onRemoved → CardStack.remove).
+    /// A BLOCKED row only focuses the GUI (the pending question is already
+    /// on screen there); its row is removed so the card reflects "handled".
+    private func jumpAndRemoveRow(_ card: NotificationCard, row: Int) {
+        let entry = (row >= 1 && row <= card.entries.count)
+            ? card.entries[row - 1]
+            : nil
+        jump(card, focusOnly: entry?.kind == .blocked)
+        let removed = card.removeCompletion(index: row)
+        if removed != nil {
+            if card.completionCount == 0 {
+                // Last row handled: animate out (onRemoved → CardStack.remove).
+                // No relayout here — the card is still in the stack until the
+                // animation ends, and relayouting it mid-dismiss would yank it
+                // back into the stack position.
+                card.dismiss()
+            } else {
+                // Rows remain: re-stack under the new (shorter) frame.
+                card.onToggleExpanded?(card)
+            }
+        }
+    }
+
+    /// Dispatch the card action off the main thread when it drives a browser.
+    private func jump(_ card: NotificationCard, focusOnly: Bool = false) {
+        let action = card.action
+        let run = { card.performAction(focusOnly: focusOnly) }
+        if action == "jump-web" {
+            DispatchQueue.global(qos: .userInitiated).async(execute: run)
+        } else {
+            run()
+        }
     }
 }
 // MARK: - Session deep link
@@ -530,10 +665,41 @@ enum BrowserJumper {
     /// Default GUI origin (the running web server's actual port when known).
     static var guiBaseUrl: String = "http://127.0.0.1:3080"
 
+    /// Browser that last hosted the GUI (retried first next time).
+    /// Jumps run on a background queue (DispatchQueue.global) and several can
+    /// overlap (rapid card clicks), so reads/writes are lock-protected.
+    private static let lastHostingBrowserLock = NSLock()
+    private static var _lastHostingBrowser: String?
+    private static var lastHostingBrowser: String? {
+        get {
+            lastHostingBrowserLock.lock()
+            defer { lastHostingBrowserLock.unlock() }
+            return _lastHostingBrowser
+        }
+        set {
+            lastHostingBrowserLock.lock()
+            defer { lastHostingBrowserLock.unlock() }
+            _lastHostingBrowser = newValue
+        }
+    }
+
     /// Browsers probed in order; the first one hosting the GUI tab wins.
+    /// The names are what AppleScript resolves (stable across system
+    /// languages); the bundle ids drive the running check (localizedName is
+    /// localized, e.g. Safari → "Safari浏览器" on a Chinese system).
     private static let browserCandidates = [
         "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser",
         "Arc", "Opera"
+    ]
+
+    /// Bundle identifiers (primary + common alternate channels) per candidate.
+    private static let browserBundleIds: [String: [String]] = [
+        "Safari": ["com.apple.Safari"],
+        "Google Chrome": ["com.google.Chrome", "com.google.Chrome.canary"],
+        "Microsoft Edge": ["com.microsoft.edgemac", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Beta"],
+        "Brave Browser": ["com.brave.Browser", "com.brave.Browser.beta", "com.brave.Browser.dev"],
+        "Arc": ["company.thebrowser.Browser"],
+        "Opera": ["com.operasoftware.Opera"]
     ]
 
     /// Escape a value as an AppleScript double-quoted string literal.
@@ -576,25 +742,125 @@ enum BrowserJumper {
         }
     }
 
-    /// Whether the daemon may script the named browser (macOS Automation
-    /// granted). A minimal `get version` needs no extra grants.
-    private static func canScript(_ appName: String) -> Bool {
-        runOSAScript(
-            "tell application \(asString(appName)) to get version",
-            label: "canScript-\(appName)"
-        ).code == 0
+    /// Whether the named browser is currently running (cheap lookup, no Apple
+    /// events, so a transient Automation denial never hides a running browser).
+    private static func isRunning(_ appName: String) -> Bool {
+        guard let ids = browserBundleIds[appName] else { return false }
+        let running = NSWorkspace.shared.runningApplications
+        return running.contains { app in
+            guard let bid = app.bundleIdentifier else { return false }
+            return ids.contains(bid)
+        }
     }
 
-    /// Find and navigate the tab that already shows `url` to `targetURL`.
-    /// Safari and Chromium use different dialects; returns true on success.
-    /// Only tab enumeration + navigation — no `execute javascript`, so the
-    /// browser-side "Allow JavaScript from Apple Events" setting is NOT
-    /// required (macOS Automation permission alone suffices).
+    /// Outcome of one hosting-tab probe.
+    private enum ProbeOutcome {
+        case hosted  // tab found and the action (navigate / focus) ran
+        case noHost  // browser ran but no tab shows the GUI — try next browser
+        case denied  // Apple events denied (e.g. transient -10004) — retry
+    }
+
+    /// Classify an osascript result: exit 0 = hosted; our own "dsh-no-tab"
+    /// error = noHost; anything else (permission errors, etc.) = denied.
+    private static func classify(
+        _ result: (code: Int32, stdout: String, stderr: String)
+    ) -> ProbeOutcome {
+        if result.code == 0 { return .hosted }
+        if result.stderr.contains("dsh-no-tab") { return .noHost }
+        return .denied
+    }
+
+    /// Activate the browser app via the MODERN NSRunningApplication API so
+    /// only its frontmost window (the GUI one just raised) comes forward.
+    /// AppleScript `activate` uses legacy semantics that raise EVERY window
+    /// of the app on EVERY Space: when the user clicks a card from another
+    /// desktop, that desktop's browser window ends up stacked above the app
+    /// they were using (e.g. a Markdown editor). The modern API (Big Sur+)
+    /// without `.activateAllWindows` only activates + switches to the Space
+    /// of the app's active window, leaving other Spaces' stacking untouched.
+    private static func activateApp(_ appName: String) -> Bool {
+        guard let primaryId = browserBundleIds[appName]?.first,
+              let app = NSWorkspace.shared.runningApplications.first(where: {
+                  $0.bundleIdentifier == primaryId
+              })
+        else { return false }
+        // No options: modern (macOS 14+) activation — activates the app and
+        // its active window without raising windows on other Spaces.
+        return app.activate(options: [])
+    }
+
+    /// Focus the browser window/tab already showing `guiUrl` (no URL change —
+    /// used for a card that is waiting on the user's approval/answer already
+    /// on screen). Raises that tab's window inside the app, then activates the
+    /// app through the modern API (no cross-Space window raise).
+    private static func focusHostingTab(appName: String, guiUrl: String) -> ProbeOutcome {
+        let script: String
+        if appName == "Safari" {
+            script = """
+            tell application "Safari"
+              set targetTab to missing value
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if URL of t starts with \(asString(guiUrl)) then
+                    set targetTab to t
+                    exit repeat
+                  end if
+                end repeat
+                if targetTab is not missing value then exit repeat
+              end repeat
+              if targetTab is not missing value then
+                set current tab of (first window whose tabs contains targetTab) to targetTab
+                set index of (first window whose tabs contains targetTab) to 1
+              else
+                error "dsh-no-tab"
+              end if
+            end tell
+            """
+        } else {
+            // Chromium family: activate the hosting window/tab only.
+            script = """
+            tell application \(asString(appName))
+              set targetTab to missing value
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if URL of t starts with \(asString(guiUrl)) then
+                    set targetTab to t
+                    exit repeat
+                  end if
+                end repeat
+                if targetTab is not missing value then exit repeat
+              end repeat
+              if targetTab is not missing value then
+                set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
+                set index of (first window whose tabs contains targetTab) to 1
+              else
+                error "dsh-no-tab"
+              end if
+            end tell
+            """
+        }
+        let outcome = classify(runOSAScript(script, label: "focus-\(appName)"))
+        if outcome == .hosted {
+            dshLog("[focus] \(appName) tab raised; modern-activating\n")
+            _ = activateApp(appName)
+        }
+        return outcome
+    }
+
+    /// Find and navigate the tab that already shows `guiUrl` to `targetURL`.
+    /// Safari and Chromium use different dialects. Only tab enumeration +
+    /// navigation — no `execute javascript` for Safari, so the browser-side
+    /// "Allow JavaScript from Apple Events" setting is NOT required (macOS
+    /// Automation permission alone suffices). Chromium targets the enumerated
+    /// tab directly (never relies on the front window), then the app is
+    /// activated through the modern API (no cross-Space window raise).
     private static func navigateHostingTab(
         appName: String, guiUrl: String, targetURL: String
-    ) -> Bool {
+    ) -> ProbeOutcome {
+        let script: String
         if appName == "Safari" {
-            let script = """
+            // Safari can `set URL` on the specific tab directly.
+            script = """
             tell application "Safari"
               set targetTab to missing value
               repeat with w in windows
@@ -610,57 +876,44 @@ enum BrowserJumper {
                 set URL of targetTab to \(asString(targetURL))
                 set current tab of (first window whose tabs contains targetTab) to targetTab
                 set index of (first window whose tabs contains targetTab) to 1
-                activate
               else
                 error "dsh-no-tab"
               end if
             end tell
             """
-            return runOSAScript(script, label: "navigate-\(appName)").code == 0
+        } else {
+            // Chromium: tab.URL is read-only; execute javascript on the
+            // enumerated targetTab itself (needs "Allow JavaScript from Apple
+            // Events"), falling back to `open location`.
+            script = """
+            tell application \(asString(appName))
+              set targetTab to missing value
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if URL of t starts with \(asString(guiUrl)) then
+                    set targetTab to t
+                    exit repeat
+                  end if
+                end repeat
+                if targetTab is not missing value then exit repeat
+              end repeat
+              if targetTab is missing value then error "dsh-no-tab"
+              set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
+              set index of (first window whose tabs contains targetTab) to 1
+              try
+                execute targetTab javascript \(asString("location.href = \(asString(targetURL));"))
+              on error
+                open location \(asString(targetURL))
+              end try
+            end tell
+            """
         }
-        // Chromium family (Chrome/Edge/Brave/Arc/Opera share this dialect).
-        // Note: Chromium's `tab.URL` is read-only in its AppleScript dictionary,
-        // so navigation goes through `execute javascript` (needs the browser's
-        // "Allow JavaScript from Apple Events") or `open location`. Try `set URL`
-        // first (harmless if supported), then JS, then open-location in the
-        // hosting window.
-        let enumScript = """
-        tell application \(asString(appName))
-          set targetTab to missing value
-          repeat with w in windows
-            repeat with t in tabs of w
-              if URL of t starts with \(asString(guiUrl)) then
-                set targetTab to t
-                exit repeat
-              end if
-            end repeat
-            if targetTab is not missing value then exit repeat
-          end repeat
-          if targetTab is missing value then error "dsh-no-tab"
-          set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
-          set index of (first window whose tabs contains targetTab) to 1
-          activate
-          return index of targetTab
-        end tell
-        """
-        let result = runOSAScript(enumScript, label: "enum-\(appName)")
-        guard result.code == 0 else { return false }
-        // Tab found and focused. Navigate it to the hashed URL.
-        let js = "location.href = \(asString(targetURL));"
-        let navScript = """
-        tell application \(asString(appName))
-          set targetTab to active tab of front window
-          execute targetTab javascript \(asString(js))
-        end tell
-        """
-        if runOSAScript(navScript, label: "navjs-\(appName)").code == 0 { return true }
-        // JS injection unavailable — fall back to open location (front window now hosts the GUI).
-        let openScript = """
-        tell application \(asString(appName))
-          open location \(asString(targetURL))
-        end tell
-        """
-        return runOSAScript(openScript, label: "navopen-\(appName)").code == 0
+        let outcome = classify(runOSAScript(script, label: "navigate-\(appName)"))
+        if outcome == .hosted {
+            dshLog("[navigate] \(appName) tab updated; modern-activating\n")
+            _ = activateApp(appName)
+        }
+        return outcome
     }
 
     /// The deep-link hash the client half listens for.
@@ -671,9 +924,11 @@ enum BrowserJumper {
 
     /// Jump: point the hosting browser tab at the hashed GUI URL so the
     /// client half switches sessions in place; fall back to `open` when no
-    /// browser hosts the GUI yet.
-    static func jump(url: String?, sessionId: String?, sessionTitle: String?) {
-        dshLog("[jump] start url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
+    /// browser hosts the GUI yet. When `focusOnly` is true (a card waiting on
+    /// the user, e.g. approval/answer) it activates the hosting tab without
+    /// navigating — the pending UI is already there.
+    static func jump(url: String?, sessionId: String?, sessionTitle: String?, focusOnly: Bool = false) {
+        dshLog("[jump] start focusOnly=\(focusOnly) url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
         let guiUrl = (url?.isEmpty == false) ? url! : guiBaseUrl
         guard let sessionId, !sessionId.isEmpty else {
             if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
@@ -682,21 +937,45 @@ enum BrowserJumper {
         let target = jumpURL(url: url, sessionId: sessionId)
         dshLog("[jump] target=\(target)\n")
 
-        // 1) Hosting-tab navigation (precise: correct browser, correct Space).
-        for app in browserCandidates where canScript(app) {
-            dshLog("[jump] probing \(app)\n")
-            if navigateHostingTab(appName: app, guiUrl: guiUrl, targetURL: target) {
-                dshLog("[jump] navigated tab in \(app)\n")
-                return
-            }
-            dshLog("[jump]   \(app) does not host the GUI\n")
+        // Try the browser that worked last time first, then the others.
+        var order = browserCandidates
+        if let last = lastHostingBrowser,
+           let idx = order.firstIndex(of: last) {
+            order.remove(at: idx)
+            order.insert(last, at: 0)
         }
 
-        // 2) Fallback: system open (GUI loads; client half handles the hash on boot).
+        // A -10004 (Apple events denied while e.g. a system dialog owns the
+        // focus) is transient: retry the whole probe up to 3 times, but only
+        // while some running browser got DENIED. A clean pass where every
+        // running browser reports no hosting tab needs no retry.
+        for pass in 1...3 {
+            var sawDenied = false
+            for app in order where isRunning(app) {
+                dshLog("[jump] pass \(pass) probing \(app)\n")
+                let outcome: ProbeOutcome = focusOnly
+                    ? focusHostingTab(appName: app, guiUrl: guiUrl)
+                    : navigateHostingTab(appName: app, guiUrl: guiUrl, targetURL: target)
+                switch outcome {
+                case .hosted:
+                    lastHostingBrowser = app
+                    dshLog("[jump] \(focusOnly ? "focused" : "navigated") tab in \(app)\n")
+                    return
+                case .denied:
+                    sawDenied = true   // transient? try the whole pass again
+                case .noHost:
+                    break              // try the next running browser
+                }
+            }
+            if !sawDenied { break }
+            if pass < 3 { Thread.sleep(forTimeInterval: 0.5) }
+        }
+
+        // Fallback: system open (GUI loads; client half handles the hash on boot).
         dshLog("[jump] no hosting tab found; falling back to open\n")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = [target]
+        process.arguments = [focusOnly ? guiUrl : target]
         do {
             try process.run()
             process.waitUntilExit()
@@ -728,12 +1007,14 @@ final class CardStack {
             sessionTitle = "DeepSeek Harness"
         }
         let message = request.message.flatMap { $0.isEmpty ? nil : $0 } ?? "任务已完成"
+        let kind = OutcomeKind.parse(request.kind)
+        let detail = request.detail
         let action = request.action ?? "jump-web"
 
         // Merge into an existing card for the same session.
         if let sessionId = request.sessionId, !sessionId.isEmpty,
            let existing = cards.first(where: { $0.sessionId == sessionId }) {
-            existing.addCompletion(message: message)
+            existing.addCompletion(message: message, kind: kind, detail: detail)
             relayout(animated: false)
             if request.sound == true { NSSound(named: NSSound.Name("Glass"))?.play() }
             return
@@ -748,7 +1029,7 @@ final class CardStack {
             url: request.url,
             autoDismissSec: request.autoDismissSec
         )
-        card.addCompletion(message: message)
+        card.addCompletion(message: message, kind: kind, detail: detail)
         card.onRemoved = { [weak self] removed in
             self?.remove(removed)
         }
@@ -878,6 +1159,8 @@ final class SocketServer {
                 cmd: "show",
                 title: object["title"] as? String,
                 message: object["message"] as? String,
+                kind: object["kind"] as? String,
+                detail: object["detail"] as? String,
                 action: object["action"] as? String,
                 path: object["path"] as? String,
                 url: object["url"] as? String,
@@ -898,11 +1181,17 @@ final class SocketServer {
             reply("{\"ok\":true,\"daemon\":true}\n")
         case "debug":
             // On-demand diagnostic: run a full jump (as if a card was clicked)
-            // and reply when it settles. Payload: {url, sessionId, sessionTitle}.
+            // and reply when it settles. Payload:
+            //   {url, sessionId, sessionTitle}          — navigate (completed/error)
+            //   {url, sessionId, sessionTitle, focusOnly:true} — focus only (blocked)
             let url = object["url"] as? String
             let sessionId = object["sessionId"] as? String
             let sessionTitle = object["sessionTitle"] as? String
-            BrowserJumper.jump(url: url, sessionId: sessionId, sessionTitle: sessionTitle)
+            let focusOnly = (object["focusOnly"] as? Bool) ?? false
+            BrowserJumper.jump(
+                url: url, sessionId: sessionId, sessionTitle: sessionTitle,
+                focusOnly: focusOnly
+            )
             reply("{\"ok\":true}\n")
         default:
             break

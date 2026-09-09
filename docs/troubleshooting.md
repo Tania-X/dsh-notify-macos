@@ -76,3 +76,33 @@ Safari: You must enable 'Allow JavaScript from Apple Events' in the Developer
 - 探测"哪个浏览器开着 GUI"用标签页 URL 枚举即可（`repeat with t in tabs of w … if URL of t starts with …`），不需要 JS 权限。
 - 注入跳转脚本才需要浏览器侧「Allow JavaScript from Apple Events」。
 - 两者都受 macOS「自动化」授权约束；分步排查可先用只读 probe 缩小范围。
+
+## 14. 跨桌面点卡会把“原桌面”的浏览器窗口抬到最前（已知，未根治）
+
+### 现象
+
+GUI（Safari）在桌面 A，用户在看 md 文档（Typora）的桌面 B 上点击悬浮卡片后：屏幕自动切到桌面 A 处理事件；滑回桌面 B 时，**Safari 在桌面 B 上本来就有的窗口**（例如一个 GitHub 标签页窗口）盖在了 Typora 之上。多桌面用户每次跨桌面点卡都要手动点一下 Typora 恢复。使用上有不便，但可接受，已记录待修。
+
+### 排查过程（结论先行）
+
+1. 卡片 `.canJoinAllSpaces` 全桌面可见，跨桌面点卡是常态路径。
+2. 读 `com.apple.spaces` 拿到每个桌面的窗口 id 集合，配合 CGWindowList 的 owner 名，确认：桌面 A 有 Safari GUI 窗口（`DeepSeek…— DeepSeek Harness`），桌面 B 同时有 Typora **和另一个 Safari 窗口**（GitHub）。关键前提是**同一个浏览器应用在两个桌面都有窗口**。
+3. 实验一：从桌面 A 激活 Safari，桌面 B 的层叠（CGWindowList 相对序）不变 → 激活的“抬升”作用在**当前桌面**。
+4. 实验二（用户复现）：在桌面 B 点卡 → 屏幕**自动切**到桌面 A（程序化激活会跨桌面切换），且桌面 B 的 Safari 被抬到 Typora 之上 → 激活时先把“当前桌面（=桌面 B）”上该应用的窗口抬到最前，再切换桌面。
+5. 实验三：从桌面 A 激活 Typora（窗口只在桌面 B）→ 用户被**带回**桌面 B。⇒ 任何“事后把原应用抬回去”的 undo 方案都会把用户拽回原桌面，不可行。
+6. 已尝试但**无效**的修复（commit `1062279`）：把 AppleScript `activate` 换成 `NSRunningApplication.activate(options: [])`（Big Sur 后“只激活不全抬”的现代语义）。用户复现仍被抬 —— macOS 26 上无论哪种激活，都会先在当前桌面抬升该应用窗口再切换，无法用选项关掉（`.activateIgnoringOtherApps` 在 macOS 14+ 已废弃无效果）。
+
+### 建议修复（未实现）：锚点两步切换
+
+干净修法不是“事后恢复”，而是**切换前不让目标应用的窗口出现在当前桌面**：
+
+1. 点卡 → 确认托管窗口**不在当前桌面**（用 CGWindowList `.optionOnScreenOnly` + AppleScript 拿到的托管窗口 bounds 判断是否在屏）；
+2. 若不在 → 先激活一个“窗口只存在于 GUI 桌面的应用”（锚点）：它没有窗口在其他桌面，激活它只会把用户切到 GUI 桌面、**不抬升任何原桌面窗口**（实验已验证：激活桌面 A 独有的“提醒事项”即可无副作用切过去）；
+3. 此时当前桌面 = GUI 桌面 → 再正常激活浏览器，抬升只落在 GUI 桌面；
+4. 兜底：找不到可靠锚点（GUI 桌面只有浏览器窗口等）→ 退回现在的直接激活。
+
+技术要点：锚点 = 从 `com.apple.spaces` 的窗口归属集合里找“窗口只出现在 GUI 桌面所在集合、且 owner ≠ 浏览器”的运行中应用；owner 用 CGWindowList 拿（无需录屏权限的是 owner 与 bounds，窗口标题才需要）。该 plist 结构随 macOS 版本有差异，需 try/降级。若 GUI 桌面恰好只有浏览器窗口，则无锚点可用——可考虑退化为“接受现状”或提示用户。
+
+### 用户侧临时缓解
+
+跨桌面点卡后回到原桌面，若浏览器窗口盖住了正在用的应用：点一下该应用的 Dock 图标即可恢复层叠（无需改任何代码）。
