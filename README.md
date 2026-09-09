@@ -130,6 +130,7 @@ cp .build/release/dsh-notify-server bin/                 # 产物就位（插件
 npm test                                                 # host/client 纯逻辑单测（vitest）
 swift test                                               # Core XCTest（需含 XCTest 的 Xcode/CI；本地 CLT-only 会报 XCTest not available）
 ./test/socket-smoke.sh                                   # daemon 协议冒烟基线
+npm run test:e2e                                        # client 半区 Playwright（harness 页，无需真 dsh web）
 ```
 
 CI：`.github/workflows/tests.yml` 跑 `npm test`（ubuntu）与 `swift test`（macos-15）。
