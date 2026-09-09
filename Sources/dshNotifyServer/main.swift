@@ -191,10 +191,11 @@ final class NotificationCard: NSObject {
 
     // MARK: Actions
 
-    /// Perform the click action (jump to the completion location). When
-    /// `focusOnly` is true (the completion was BLOCKED, i.e. it is waiting on
-    /// the user — the approval/ask UI is already open in the GUI tab) the
-    /// browser is only brought to the front, never navigated.
+    /// Perform the click action (jump to the completion location).
+    ///
+    /// Card clicks always deep-link to the card's session (blocked included:
+    /// its pending approval/ask lives at that session's newest message). The
+    /// `focusOnly` switch is retained solely for the socket `debug` command.
     func performAction(focusOnly: Bool = false) {
         switch action {
         case "open-folder":
@@ -495,25 +496,23 @@ final class CardView: NSView {
     }
 
     /// Run the card action (jump), then dismiss. Browser driving can block
-    /// briefly, so dispatch off the main thread and clear immediately. A
-    /// single-completion card whose outcome is BLOCKED only focuses the GUI
-    /// (its approval/ask UI is already open there) — it is dismissed either
-    /// way, because the user is about to answer in the GUI.
+    /// briefly, so dispatch off the main thread and clear immediately.
+    ///
+    /// Every click — including BLOCKED entries — deep-links to the card's own
+    /// session (its approval/ask UI lives at that session's newest message).
+    /// Focus-only would leave the GUI on whichever session is active (the
+    /// "newest" one) and miss the pending session entirely.
     private func jumpAndDismiss(_ card: NotificationCard) {
-        let focusOnly = card.entries.first?.kind == .blocked
-        jump(card, focusOnly: focusOnly)
+        jump(card)
         card.dismiss()
     }
 
     /// Jump to one row's completion, then remove that row. When the last row
     /// is removed the card dismisses itself (onRemoved → CardStack.remove).
-    /// A BLOCKED row only focuses the GUI (the pending question is already
-    /// on screen there); its row is removed so the card reflects "handled".
+    /// BLOCKED rows deep-link to their session like any other; removing the
+    /// row just marks it handled.
     private func jumpAndRemoveRow(_ card: NotificationCard, row: Int) {
-        let entry = (row >= 1 && row <= card.entries.count)
-            ? card.entries[row - 1]
-            : nil
-        jump(card, focusOnly: entry?.kind == .blocked)
+        jump(card)
         let removed = card.removeCompletion(index: row)
         if removed != nil {
             if card.completionCount == 0 {
