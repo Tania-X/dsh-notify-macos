@@ -128,8 +128,12 @@ echo '{"cmd":"probe"}' | nc -U $TMPDIR/dsh-notify-macos.sock
 swift build -c release                                   # 编译守护进程（SwiftPM）
 cp .build/release/dsh-notify-server bin/                 # 产物就位（插件 serverPath 默认指向 bin/）
 npm test                                                 # host/client 纯逻辑单测（vitest）
+swift test                                               # Core XCTest（需含 XCTest 的 Xcode/CI；本地 CLT-only 会报 XCTest not available）
 ./test/socket-smoke.sh                                   # daemon 协议冒烟基线
 ```
+
+CI：`.github/workflows/tests.yml` 跑 `npm test`（ubuntu）与 `swift test`（macos-15）。
+
 
 源码布局（SwiftPM，见 `docs/l2-swiftpm-split.md`）：`Sources/dshNotifyCore`（纯逻辑库，可单测）+
 `Sources/dshNotifyServer`（AppKit 壳）。测试需要含 XCTest 的完整 Xcode 工具链。
