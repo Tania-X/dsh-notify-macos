@@ -125,9 +125,14 @@ echo '{"cmd":"probe"}' | nc -U $TMPDIR/dsh-notify-macos.sock
 ## 开发
 
 ```bash
-cd bin
-swiftc -O dsh-notify-server.swift -o dsh-notify-server   # 重新编译守护进程
+swift build -c release                                   # 编译守护进程（SwiftPM）
+cp .build/release/dsh-notify-server bin/                 # 产物就位（插件 serverPath 默认指向 bin/）
+npm test                                                 # host/client 纯逻辑单测（vitest）
+./test/socket-smoke.sh                                   # daemon 协议冒烟基线
 ```
+
+源码布局（SwiftPM，见 `docs/l2-swiftpm-split.md`）：`Sources/dshNotifyCore`（纯逻辑库，可单测）+
+`Sources/dshNotifyServer`（AppKit 壳）。测试需要含 XCTest 的完整 Xcode 工具链。
 
 Socket 协议（JSON Lines）：
 
