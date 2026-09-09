@@ -880,7 +880,7 @@ enum BrowserJumper {
               set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
               set index of (first window whose tabs contains targetTab) to 1
               try
-                execute targetTab javascript \(asString("location.href = \(targetURL);"))
+                execute targetTab javascript \(asString("location.href = \(asString(targetURL));"))
               on error
                 open location \(asString(targetURL))
               end try
