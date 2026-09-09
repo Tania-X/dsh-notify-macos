@@ -749,12 +749,33 @@ enum BrowserJumper {
         return .denied
     }
 
-    /// Activate the browser window/tab already showing `guiUrl` (no URL
-    /// change — used to focus the GUI without navigating, e.g. for a card
-    /// that is waiting on the user's approval/answer already on screen).
+    /// Activate the browser app via the MODERN NSRunningApplication API so
+    /// only its frontmost window (the GUI one just raised) comes forward.
+    /// AppleScript `activate` uses legacy semantics that raise EVERY window
+    /// of the app on EVERY Space: when the user clicks a card from another
+    /// desktop, that desktop's browser window ends up stacked above the app
+    /// they were using (e.g. a Markdown editor). The modern API (Big Sur+)
+    /// without `.activateAllWindows` only activates + switches to the Space
+    /// of the app's active window, leaving other Spaces' stacking untouched.
+    private static func activateApp(_ appName: String) -> Bool {
+        guard let primaryId = browserBundleIds[appName]?.first,
+              let app = NSWorkspace.shared.runningApplications.first(where: {
+                  $0.bundleIdentifier == primaryId
+              })
+        else { return false }
+        // No options: modern (macOS 14+) activation — activates the app and
+        // its active window without raising windows on other Spaces.
+        return app.activate(options: [])
+    }
+
+    /// Focus the browser window/tab already showing `guiUrl` (no URL change —
+    /// used for a card that is waiting on the user's approval/answer already
+    /// on screen). Raises that tab's window inside the app, then activates the
+    /// app through the modern API (no cross-Space window raise).
     private static func focusHostingTab(appName: String, guiUrl: String) -> ProbeOutcome {
+        let script: String
         if appName == "Safari" {
-            let script = """
+            script = """
             tell application "Safari"
               set targetTab to missing value
               repeat with w in windows
@@ -769,53 +790,56 @@ enum BrowserJumper {
               if targetTab is not missing value then
                 set current tab of (first window whose tabs contains targetTab) to targetTab
                 set index of (first window whose tabs contains targetTab) to 1
-                activate
               else
                 error "dsh-no-tab"
               end if
             end tell
             """
-            return classify(runOSAScript(script, label: "focus-\(appName)"))
-        }
-        // Chromium family: activate the hosting window/tab only.
-        let script = """
-        tell application \(asString(appName))
-          set targetTab to missing value
-          repeat with w in windows
-            repeat with t in tabs of w
-              if URL of t starts with \(asString(guiUrl)) then
-                set targetTab to t
-                exit repeat
+        } else {
+            // Chromium family: activate the hosting window/tab only.
+            script = """
+            tell application \(asString(appName))
+              set targetTab to missing value
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if URL of t starts with \(asString(guiUrl)) then
+                    set targetTab to t
+                    exit repeat
+                  end if
+                end repeat
+                if targetTab is not missing value then exit repeat
+              end repeat
+              if targetTab is not missing value then
+                set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
+                set index of (first window whose tabs contains targetTab) to 1
+              else
+                error "dsh-no-tab"
               end if
-            end repeat
-            if targetTab is not missing value then exit repeat
-          end repeat
-          if targetTab is not missing value then
-            set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
-            set index of (first window whose tabs contains targetTab) to 1
-            activate
-          else
-            error "dsh-no-tab"
-          end if
-        end tell
-        """
-        return classify(runOSAScript(script, label: "focus-\(appName)"))
+            end tell
+            """
+        }
+        let outcome = classify(runOSAScript(script, label: "focus-\(appName)"))
+        if outcome == .hosted {
+            dshLog("[focus] \(appName) tab raised; modern-activating\n")
+            _ = activateApp(appName)
+        }
+        return outcome
     }
 
     /// Find and navigate the tab that already shows `guiUrl` to `targetURL`.
     /// Safari and Chromium use different dialects. Only tab enumeration +
     /// navigation — no `execute javascript` for Safari, so the browser-side
     /// "Allow JavaScript from Apple Events" setting is NOT required (macOS
-    /// Automation permission alone suffices).
+    /// Automation permission alone suffices). Chromium targets the enumerated
+    /// tab directly (never relies on the front window), then the app is
+    /// activated through the modern API (no cross-Space window raise).
     private static func navigateHostingTab(
         appName: String, guiUrl: String, targetURL: String
     ) -> ProbeOutcome {
-        // Chromium's tab.URL is read-only in its AppleScript dictionary, so
-        // navigation goes through `execute javascript` (needs the browser's
-        // "Allow JavaScript from Apple Events") or `open location`. Safari can
-        // `set URL` directly.
+        let script: String
         if appName == "Safari" {
-            let script = """
+            // Safari can `set URL` on the specific tab directly.
+            script = """
             tell application "Safari"
               set targetTab to missing value
               repeat with w in windows
@@ -831,53 +855,44 @@ enum BrowserJumper {
                 set URL of targetTab to \(asString(targetURL))
                 set current tab of (first window whose tabs contains targetTab) to targetTab
                 set index of (first window whose tabs contains targetTab) to 1
-                activate
               else
                 error "dsh-no-tab"
               end if
             end tell
             """
-            return classify(runOSAScript(script, label: "navigate-\(appName)"))
+        } else {
+            // Chromium: tab.URL is read-only; execute javascript on the
+            // enumerated targetTab itself (needs "Allow JavaScript from Apple
+            // Events"), falling back to `open location`.
+            script = """
+            tell application \(asString(appName))
+              set targetTab to missing value
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if URL of t starts with \(asString(guiUrl)) then
+                    set targetTab to t
+                    exit repeat
+                  end if
+                end repeat
+                if targetTab is not missing value then exit repeat
+              end repeat
+              if targetTab is missing value then error "dsh-no-tab"
+              set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
+              set index of (first window whose tabs contains targetTab) to 1
+              try
+                execute targetTab javascript \(asString("location.href = \(targetURL);"))
+              on error
+                open location \(asString(targetURL))
+              end try
+            end tell
+            """
         }
-        // Chromium family: enumerate + activate the hosting tab, then navigate
-        // via execute javascript (falling back to open location).
-        let enumScript = """
-        tell application \(asString(appName))
-          set targetTab to missing value
-          repeat with w in windows
-            repeat with t in tabs of w
-              if URL of t starts with \(asString(guiUrl)) then
-                set targetTab to t
-                exit repeat
-              end if
-            end repeat
-            if targetTab is not missing value then exit repeat
-          end repeat
-          if targetTab is missing value then error "dsh-no-tab"
-          set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
-          set index of (first window whose tabs contains targetTab) to 1
-          activate
-          return index of targetTab
-        end tell
-        """
-        let result = runOSAScript(enumScript, label: "enum-\(appName)")
-        guard result.code == 0 else { return classify(result) }
-        let js = "location.href = \(asString(targetURL));"
-        let navScript = """
-        tell application \(asString(appName))
-          set targetTab to active tab of front window
-          execute targetTab javascript \(asString(js))
-        end tell
-        """
-        if classify(runOSAScript(navScript, label: "navjs-\(appName)")) == .hosted {
-            return .hosted
+        let outcome = classify(runOSAScript(script, label: "navigate-\(appName)"))
+        if outcome == .hosted {
+            dshLog("[navigate] \(appName) tab updated; modern-activating\n")
+            _ = activateApp(appName)
         }
-        let openScript = """
-        tell application \(asString(appName))
-          open location \(asString(targetURL))
-        end tell
-        """
-        return classify(runOSAScript(openScript, label: "navopen-\(appName)"))
+        return outcome
     }
 
     /// The deep-link hash the client half listens for.
