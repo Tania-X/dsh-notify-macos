@@ -23,7 +23,6 @@ import Foundation
 import dshNotifyCore
 
 // MARK: - Diagnostics
-// MARK: - Diagnostics
 
 /// Append one diagnostic line to the daemon log.
 func dshLog(_ line: String) {
@@ -67,7 +66,7 @@ func daemonAlreadyRunning(_ path: String) -> Bool {
     return rc == 0
 }
 
-/// Aggregated card: represents ONE session/// Aggregated card: represents ONE session that completed N times.
+/// Aggregated card: represents ONE session that completed N times.
 /// Multiple completions of the same session merge into a single card
 /// (collapsed by default once N >= 2); expanding reveals per-completion
 /// rows. Dragging the whole card right clears that session's group.
