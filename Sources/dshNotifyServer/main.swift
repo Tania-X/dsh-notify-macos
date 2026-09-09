@@ -20,6 +20,7 @@
 import AppKit
 import Darwin
 import Foundation
+import dshNotifyCore
 
 // MARK: - Diagnostics
 
@@ -65,67 +66,6 @@ func daemonAlreadyRunning(_ path: String) -> Bool {
     return rc == 0
 }
 
-// MARK: - Models
-
-struct ShowRequest {
-    let cmd: String
-    let title: String?
-    let message: String?
-    /// Outcome kind: "completed" | "error" | "blocked" (default completed).
-    let kind: String?
-    /// Structured detail for error/blocked (error message / tool name).
-    let detail: String?
-    let action: String?
-    let path: String?
-    let url: String?
-    let sessionId: String?
-    let sessionTitle: String?
-    let sound: Bool?
-    let autoDismissSec: Double?
-}
-
-// MARK: - Completion entry & aggregated card
-
-/// One completion occurrence inside an aggregated session card.
-/// Outcome kind of one completion, with its UI accent color.
-enum OutcomeKind: String {
-    case completed, error, blocked
-
-    /// Parse a wire kind string; anything unknown degrades to completed.
-    static func parse(_ raw: String?) -> OutcomeKind {
-        switch raw {
-        case "error": return .error
-        case "blocked": return .blocked
-        default: return .completed
-        }
-    }
-
-    /// Left accent bar / status dot color (on the dark card).
-    var color: NSColor {
-        switch self {
-        case .completed: return NSColor(calibratedRed: 0.35, green: 0.85, blue: 0.55, alpha: 1)   // soft green
-        case .error:     return NSColor(calibratedRed: 0.95, green: 0.30, blue: 0.30, alpha: 1)   // red
-        case .blocked:   return NSColor(calibratedRed: 0.95, green: 0.75, blue: 0.25, alpha: 1)   // amber
-        }
-    }
-
-    /// Dimmed variant for the aggregated summary line.
-    var dimColor: NSColor {
-        return color.withAlphaComponent(0.9)
-    }
-}
-
-/// One completion occurrence inside an aggregated session card.
-struct CompletionEntry {
-    let message: String
-    let time: Date
-    let kind: OutcomeKind
-    /// Structured detail (error message / tool name) when present.
-    let detail: String?
-    /// Sequential index within this card (1-based, newest = last).
-    let index: Int
-}
-
 /// Aggregated card: represents ONE session that completed N times.
 /// Multiple completions of the same session merge into a single card
 /// (collapsed by default once N >= 2); expanding reveals per-completion
@@ -139,10 +79,8 @@ final class NotificationCard: NSObject {
     let window: NSWindow
     let view: CardView
 
-    /// Completions in arrival order (last = newest). Always >= 1.
-    private(set) var entries: [CompletionEntry] = []
-    /// Whether the detail rows are shown (only meaningful when count > 1).
-    private(set) var expanded = false
+    /// Pure aggregation state machine (extracted to dshNotifyCore for tests).
+    let model = CardModel()
 
     var onRemoved: ((NotificationCard) -> Void)?
     var onToggleExpanded: ((NotificationCard) -> Void)?
@@ -182,92 +120,52 @@ final class NotificationCard: NSObject {
         }
     }
 
-    // MARK: Data
+    // MARK: Data (forwarded to the pure CardModel)
+
+    var entries: [CompletionEntry] { model.entries }
+    var completionCount: Int { model.completionCount }
+    var newestEntry: CompletionEntry? { model.newestEntry }
+    var isCollapsed: Bool { model.isCollapsed }
+    var expanded: Bool { model.expanded }
+
+    /// Whether the card contains any entry of the given kind.
+    func contains(kind: OutcomeKind) -> Bool { model.contains(kind: kind) }
+
+    /// The card's dominant kind = the HIGHEST-priority kind present
+    /// (blocked > error > completed).
+    var dominantKind: OutcomeKind { model.dominantKind }
+
+    /// Body copy under the title (composition-aware), see CardModel.
+    var summaryLine: String { model.summaryLine }
 
     /// Append one completion, merging into this card. Recomputes the frame
     /// for collapsed/expanded height. Returns the entry index (1-based).
     @discardableResult
     func addCompletion(message: String, kind: OutcomeKind, detail: String?, at time: Date = Date()) -> Int {
-        entries.append(CompletionEntry(message: message, time: time, kind: kind, detail: detail, index: entries.count + 1))
+        let index = model.addCompletion(message: message, kind: kind, detail: detail, at: time)
         updateFrame()
-        return entries.count
+        return index
     }
 
-    var completionCount: Int { entries.count }
-    var newestEntry: CompletionEntry? { entries.last }
-
-    var isCollapsed: Bool { !expanded }
-
-    /// Whether the card contains any entry of the given kind.
-    func contains(kind: OutcomeKind) -> Bool {
-        entries.contains { $0.kind == kind }
-    }
-
-    /// The card's dominant kind = the HIGHEST-priority kind present
-    /// (blocked > error > completed). The header accent follows this, so a
-    /// card with any failure/attention item is never shown as plain green.
-    var dominantKind: OutcomeKind {
-        if contains(kind: .blocked) { return .blocked }
-        if contains(kind: .error) { return .error }
-        return .completed
-    }
-
-    /// Remove one completion by its 1-based arrival index. Returns the
-    /// removed entry, or nil when the index is out of range.
+    /// Remove one completion by its 1-based arrival index (state in the
+    /// model; re-stacks here). Returns the removed entry, or nil.
     @discardableResult
     func removeCompletion(index: Int) -> CompletionEntry? {
-        guard index >= 1, index <= entries.count else { return nil }
-        let removed = entries.remove(at: index - 1)
-        // Reindex the remaining entries so row indices stay contiguous.
-        for (i, entry) in entries.enumerated() {
-            entries[i] = CompletionEntry(
-                message: entry.message, time: entry.time,
-                kind: entry.kind, detail: entry.detail, index: i + 1
-            )
-        }
-        if entries.count <= 1 { expanded = false }  // auto-collapse to single
+        let removed = model.removeCompletion(index: index)
         updateFrame()
         return removed
     }
 
-    /// Body copy under the title, reflecting the card's composition:
-    ///   single            -> the entry's message (plus detail when present)
-    ///   all completed     -> "已完成 N 次 · 最近 hh:mm"
-    ///   has error(s)      -> "N 次中 M 次失败 · 最近 hh:mm"
-    ///   has blocked       -> "N 次中 B 次需你处理 · 最近 hh:mm"  (blocked wins copy)
-    var summaryLine: String {
-        guard let newest = newestEntry else { return "" }
-        if entries.count == 1 {
-            if let detail = newest.detail, !detail.isEmpty {
-                return "\(newest.message) · \(detail)"
-            }
-            return newest.message
-        }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        let time = formatter.string(from: newest.time)
-        let errorCount = entries.filter { $0.kind == .error }.count
-        let blockedCount = entries.filter { $0.kind == .blocked }.count
-        if blockedCount > 0 {
-            return "\(entries.count) 次中 \(blockedCount) 次需你处理 · 最近 \(time)"
-        }
-        if errorCount > 0 {
-            return "\(entries.count) 次中 \(errorCount) 次失败 · 最近 \(time)"
-        }
-        return "已完成 \(entries.count) 次 · 最近 \(time)"
-    }
-
-    // MARK: Expand / collapse
+    // MARK: Expand / collapse (state lives in the model)
 
     func toggleExpanded() {
-        expanded.toggle()
+        model.toggleExpanded()
         updateFrame()
         onToggleExpanded?(self)
     }
 
     func setExpanded(_ value: Bool) {
-        guard value != expanded else { return }
-        expanded = value
+        model.setExpanded(value)
         updateFrame()
         onToggleExpanded?(self)
     }
@@ -344,7 +242,6 @@ final class NotificationCard: NSObject {
         onRemoved?(self)
     }
 }
-
 /// Card surface: draws the aggregated card (header + optional detail rows)
 /// and handles drag-right-to-dismiss plus click-to-jump and expand/collapse.
 final class CardView: NSView {
@@ -687,20 +584,11 @@ enum BrowserJumper {
     /// The names are what AppleScript resolves (stable across system
     /// languages); the bundle ids drive the running check (localizedName is
     /// localized, e.g. Safari → "Safari浏览器" on a Chinese system).
-    private static let browserCandidates = [
-        "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser",
-        "Arc", "Opera"
-    ]
-
-    /// Bundle identifiers (primary + common alternate channels) per candidate.
-    private static let browserBundleIds: [String: [String]] = [
-        "Safari": ["com.apple.Safari"],
-        "Google Chrome": ["com.google.Chrome", "com.google.Chrome.canary"],
-        "Microsoft Edge": ["com.microsoft.edgemac", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Beta"],
-        "Brave Browser": ["com.brave.Browser", "com.brave.Browser.beta", "com.brave.Browser.dev"],
-        "Arc": ["company.thebrowser.Browser"],
-        "Opera": ["com.operasoftware.Opera"]
-    ]
+    /// Browsers probed in order + bundle ids: data lives in dshNotifyCore
+    /// (BrowserCatalog) so tests can assert it; thin computed aliases keep the
+    /// call sites unchanged.
+    private static var browserCandidates: [String] { BrowserCatalog.candidates }
+    private static var browserBundleIds: [String: [String]] { BrowserCatalog.bundleIds }
 
     /// Escape a value as an AppleScript double-quoted string literal.
     private static func asString(_ value: String) -> String {
@@ -938,12 +826,7 @@ enum BrowserJumper {
         dshLog("[jump] target=\(target)\n")
 
         // Try the browser that worked last time first, then the others.
-        var order = browserCandidates
-        if let last = lastHostingBrowser,
-           let idx = order.firstIndex(of: last) {
-            order.remove(at: idx)
-            order.insert(last, at: 0)
-        }
+        var order = JumpPolicy.probeOrder(candidates: BrowserCatalog.candidates, preferring: lastHostingBrowser)
 
         // A -10004 (Apple events denied while e.g. a system dialog owns the
         // focus) is transient: retry the whole probe up to 3 times, but only
@@ -968,7 +851,9 @@ enum BrowserJumper {
                 }
             }
             if !sawDenied { break }
-            if pass < 3 { Thread.sleep(forTimeInterval: 0.5) }
+            if JumpPolicy.shouldRetry(afterPass: pass, sawDenied: sawDenied) {
+                Thread.sleep(forTimeInterval: JumpPolicy.retryDelaySeconds)
+            }
         }
 
         // Fallback: system open (GUI loads; client half handles the hash on boot).
