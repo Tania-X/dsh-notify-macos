@@ -666,7 +666,22 @@ enum BrowserJumper {
     static var guiBaseUrl: String = "http://127.0.0.1:3080"
 
     /// Browser that last hosted the GUI (retried first next time).
-    private static var lastHostingBrowser: String?
+    /// Jumps run on a background queue (DispatchQueue.global) and several can
+    /// overlap (rapid card clicks), so reads/writes are lock-protected.
+    private static let lastHostingBrowserLock = NSLock()
+    private static var _lastHostingBrowser: String?
+    private static var lastHostingBrowser: String? {
+        get {
+            lastHostingBrowserLock.lock()
+            defer { lastHostingBrowserLock.unlock() }
+            return _lastHostingBrowser
+        }
+        set {
+            lastHostingBrowserLock.lock()
+            defer { lastHostingBrowserLock.unlock() }
+            _lastHostingBrowser = newValue
+        }
+    }
 
     /// Browsers probed in order; the first one hosting the GUI tab wins.
     /// The names are what AppleScript resolves (stable across system
