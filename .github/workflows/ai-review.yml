@@ -1,0 +1,45 @@
+# AI PR Review — 复用 ai-tools 仓库的 pr-review action
+#
+# 触发: PR 打开/更新/重新打开(目标 main)时, 用 LLM 审查 diff 并发表整体 review 评论;
+#       开发者在线程里回复 AI 审查意见时, AI 在线程内简洁回答(交互)。
+#
+# 依赖:
+#   - Secret: DEEPSEEK_API_KEY(仓库 Settings -> Secrets and variables -> Actions)
+#   - Secret: JAEGER_OTLP_AUTH(OTLP 上报鉴权,可选)
+#   - ai-tools 仓库的 pr-review action(已合并到 main, 引用 @main)
+#
+# 门禁: 存在 error 级别问题时 "AI Review" check-run 失败(PR 变红)。
+#        仓库分支保护规则勾选该 check 可阻止合并; 开发者 push 新 commit 自动重跑。
+#
+# 审查行为配置: 仓库根 .ai-review.yaml(审查重点/忽略路径/噪音门槛/门禁级别)
+name: AI Review
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run AI PR Review
+        uses: Tania-X/ai-tools/pr-review@main
+        with:
+          api-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          model: deepseek-chat
+          config-path: .ai-review.yaml
+          # 成本核算: 未填单价时自动按 DeepSeek 官方峰谷价表计算
+          otel-enabled: "1"
+          otel-endpoint: "http://47.98.234.129:4318"
+          otel-service-name: "dsh-notify-macos-review"
+          otel-headers: ${{ secrets.JAEGER_OTLP_AUTH }}

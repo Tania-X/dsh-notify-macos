@@ -1,0 +1,44 @@
+# pr-review 审查配置 — dsh-notify-macos
+# 所有项均可省略,缺省用内置默认值。哲学:先 chill,控制噪音,再逐步收紧。
+
+# 审查重点(直接作为指令进入 prompt,按重要度排序)
+# 本仓库:Swift/AppKit 守护进程(渲染/并发/socket/进程控制) + Cordis 插件(host) + 浏览器端 client half。
+review_focus:
+  - "bug 与逻辑错误"
+  - "并发/线程安全(主线程阻塞、跨线程共享状态、数据竞争)"
+  - "资源泄漏(文件描述符/socket/子进程未清理、定时器未释放)"
+  - "安全问题(AppleScript 拼接注入、localStorage/深链解析、密钥泄露)"
+  - "AppKit/UI 状态机错误(坐标锚定、命中测试、窗口生命周期)"
+  - "明显不符合项目既有约定(命名/分层/错误处理)"
+
+# 忽略的路径(glob 匹配,** 递归)。锁文件/构建产物/生成代码通常不需要审。
+ignore_paths:
+  - "**/*.lock"
+  - "**/package-lock.json"
+  - "**/pnpm-lock.yaml"
+  - "**/yarn.lock"
+  - "**/*.min.js"
+  - "**/*.min.css"
+  - "**/vendor/**"
+  - "**/generated/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/.build/**"          # Swift 编译产物/模块缓存
+  - "**/.idea/**"
+  - "**/.vscode/**"
+  - "**/node_modules/**"
+  - "bin/dsh-notify-server" # 预编译二进制(源码在 bin/*.swift)
+
+# 严重级别 1-5: 1建议 2轻微 3必修 4严重 5致命
+min_severity: 2              # 只发出 2 级(轻微)及以上的问题
+require_fix_severity: 3      # 必修线: 3 级(有真实触发路径/约定违反)标记"必修"
+fail_on_severity: 4          # 阻塞线: 4 级(严重/致命)及以上 check 失败拦合并
+
+# 切片:大 PR 按批审,控制单次 prompt token 与成本
+max_files_per_batch: 20
+
+# 单文件 patch 超过该行数则截断(评论中会提示)
+max_lines_per_file: 800
+
+# 评论末尾是否附带模型/token/成本统计
+show_stats: true
