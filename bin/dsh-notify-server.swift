@@ -618,12 +618,18 @@ final class CardView: NSView {
             : nil
         jump(card, focusOnly: entry?.kind == .blocked)
         let removed = card.removeCompletion(index: row)
-        if removed != nil && card.completionCount == 0 {
-            card.dismiss()
+        if removed != nil {
+            if card.completionCount == 0 {
+                // Last row handled: animate out (onRemoved → CardStack.remove).
+                // No relayout here — the card is still in the stack until the
+                // animation ends, and relayouting it mid-dismiss would yank it
+                // back into the stack position.
+                card.dismiss()
+            } else {
+                // Rows remain: re-stack under the new (shorter) frame.
+                card.onToggleExpanded?(card)
+            }
         }
-        // If rows remain, the frame already shrank (removeCompletion →
-        // updateFrame); CardStack re-stacks via the toggle callback.
-        card.onToggleExpanded?(card)
     }
 
     /// Dispatch the card action off the main thread when it drives a browser.
