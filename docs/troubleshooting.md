@@ -106,3 +106,11 @@ GUI（Safari）在桌面 A，用户在看 md 文档（Typora）的桌面 B 上�
 ### 用户侧临时缓解
 
 跨桌面点卡后回到原桌面，若浏览器窗口盖住了正在用的应用：点一下该应用的 Dock 图标即可恢复层叠（无需改任何代码）。
+
+## 15. SwiftPM 化之后的环境/构建坑（L2 拆分后）
+
+daemon 从单文件（`bin/dsh-notify-server.swift` + `swiftc`）改为 SwiftPM 双 target 后（见 `docs/l2-swiftpm-split.md`），记录三个新踩坑点：
+
+1. **沙箱/受限 shell 里 `swift build` 报 `Operation not permitted`**：SwiftPM 的 manifest 缓存写 `~/Library/Caches/org.swift.swiftpm`，clang module cache 写 `/var/folders/…/C/clang/ModuleCache`——都在工作区外，文件沙箱挡得住。`swiftc` 单文件时代可用 `-module-cache-path <工作区内路径>` 规避；**SwiftPM 的 manifest 编译步无法重定向该路径**（`-Xcc -fmodules-cache-path` 只作用于 target 编译），只能给足权限或在 CI 上构建。
+2. **Command Line Tools 没有 XCTest**：`swift test` 会报 `error: XCTest not available`（且 `xcrun --show-sdk-platform-path` 失败）。Core 的测试套件需完整 Xcode 或 CI（macOS runner 自带 Xcode）。全绿证据由 `.github/workflows/tests.yml`（随 PR #4 进入 main）的 `swift tests (XCTest)` job 提供；CLT 本机只能 `swift build` 验证编译。
+3. **产物路径变了**：`swift build -c release` 产物在 `.build/release/dsh-notify-server`，需 `cp` 到 `bin/dsh-notify-server`（插件 `serverPath` 默认指向包内 `bin/`）。仓库内 `bin/dsh-notify-server` 是提交的二进制产物，源码在 `Sources/`（`bin/*.swift` 已移除）。
