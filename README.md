@@ -15,11 +15,11 @@ DeepSeek Harness 插件：每次对话/任务完成后，在 MacBook 屏幕右�
 ```
 DSH host (Node 进程)
 │
-│ 1. 插件监听 agent/status：running → idle 即一轮对话完成
+│ 1. 插件监听 agent/status 与 session/event，把 completed / error / blocked 三类结束事件归一
 │
 │ 2. 插件经 Unix socket 向守护进程推送一条 show 指令
 │    └─ socket: $TMPDIR/dsh-notify-macos.sock
-│    └─ 载荷: { sessionId, sessionTitle, message, action:"jump-web" }
+│    └─ 载荷: { sessionId, sessionTitle, kind, message, detail?, action:"jump-web" }
 │
 ▼
 dsh-notify-server (Swift/AppKit 守护进程)
@@ -93,7 +93,9 @@ echo '{"cmd":"ping"}' | nc -U $TMPDIR/dsh-notify-macos.sock   # → {"ok":true}
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | 总开关 |
 | `title` | string | `"DeepSeek Harness"` | 无会话名时的兜底标题（正常显示会话名） |
-| `message` | string | `"任务完成，点击查看详情"` | 卡片正文 |
+| `messageCompleted` | string | `"任务已完成"` | 完成（completed）时卡片正文 |
+| `messageError` | string | `"任务失败，点击查看详情"` | 出错（error）时卡片正文 |
+| `messageBlocked` | string | `"需要你处理，点击查看详情"` | 等待处理（blocked：审批/提问）时卡片正文 |
 | `sound` | boolean | `false` | 完成时是否播放提示音 |
 | `rootOnly` | boolean | `true` | 仅顶层会话完成时通知（`false` 则子代理完成也通知） |
 | `clickAction` | string | `"jump-web"` | 点击行为：`jump-web`（跳会话）/ `open-folder` / `open-web` / `none` |
@@ -131,10 +133,10 @@ Socket 协议（JSON Lines）：
 
 | 命令 | 载荷 | 说明 |
 | --- | --- | --- |
-| `show` | `{sessionId, sessionTitle, title, message, action, url, sound, autoDismissSec}` | 弹卡片 |
+| `show` | `{sessionId, sessionTitle, title, kind, message, detail?, action, url, sound, autoDismissSec}` | 弹卡片（kind: `completed`/`error`/`blocked`；同一 session 多次完成合并为一张聚合卡） |
 | `ping` | — | 存活探测 → `{"ok":true}` |
-| `probe` | — | 浏览器授权探测 → `{"ok":true,"chrome":…,"safari":…}` |
-| `debug` | `{url, sessionId, sessionTitle}` | 手动触发一次跳转（诊断用） |
+| `probe` | — | 守护进程健康探测 → `{"ok":true,"daemon":true}` |
+| `debug` | `{url, sessionId, sessionTitle, focusOnly?}` | 手动触发一次跳转/聚焦（诊断用，`focusOnly:true` 模拟 blocked 点击） |
 
 ## 平台要求
 
