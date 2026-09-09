@@ -1,2 +1,5 @@
 .build/
 node_modules/
+
+# npm local cache used under the file sandbox (avoid ~/.npm writes)
+.npm-cache/
