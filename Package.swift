@@ -22,8 +22,9 @@ let package = Package(
             name: "dshNotifyServer",
             dependencies: ["dshNotifyCore"]
         ),
-        // PR-B adds: .testTarget(name: "dshNotifyCoreTests", dependencies: ["dshNotifyCore"])
-        // NOTE: swift test needs the XCTest toolchain (full Xcode); this
-        // machine only has Command Line Tools, so tests are added separately.
+        .testTarget(
+            name: "dshNotifyCoreTests",
+            dependencies: ["dshNotifyCore"]
+        ),
     ]
 )
