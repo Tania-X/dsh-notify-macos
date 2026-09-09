@@ -16,11 +16,13 @@ async function gotoHash(page, hash) {
   await page.waitForFunction(() => window.__test !== undefined);
 }
 
+async function openCalls(page) {
+  return page.evaluate(() => window.__test.openCalls());
+}
+
 test("on-load jump hash opens the session and is stripped", async ({ page }) => {
   await gotoHash(page, `${PREFIX}session-abc`);
-  await expect
-    .poll(() => page.evaluate(() => window.__test.openCalls()))
-    .toEqual(["session-abc"]);
+  await expect.poll(() => openCalls(page)).toEqual(["session-abc"]);
   // The hash must be cleared so a later identical click re-fires hashchange.
   await expect
     .poll(() => page.evaluate(() => window.location.hash))
@@ -31,9 +33,7 @@ test("hashchange (daemon click) opens the session and strips the hash", async ({
   await page.goto(HARNESS);
   await page.waitForFunction(() => window.__test !== undefined);
   await page.evaluate((h) => { window.location.hash = h; }, `#${PREFIX}session-xyz`);
-  await expect
-    .poll(() => page.evaluate(() => window.__test.openCalls()))
-    .toEqual(["session-xyz"]);
+  await expect.poll(() => openCalls(page)).toEqual(["session-xyz"]);
   await expect
     .poll(() => page.evaluate(() => window.location.hash))
     .toBe("");
@@ -44,29 +44,30 @@ test("empty / non-target hashes never open a session", async ({ page }) => {
   await page.waitForFunction(() => window.__test !== undefined);
   // not our prefix
   await page.evaluate(() => { window.location.hash = "#other/session=x"; });
-  // our prefix but no id
+  // our prefix but no id — openFromHash returns before scheduling anything
   await page.evaluate(() => { window.location.hash = `#${"dsh-notify-macos/session="}`; });
-  await page.waitForTimeout(300);
-  expect(await page.evaluate(() => window.__test.openCalls())).toEqual([]);
+  // No asynchronous work can be pending (sessionId is undefined), so an
+  // immediate poll is a faithful "never opened" assertion.
+  await expect.poll(() => openCalls(page)).toEqual([]);
 });
 
 test("jump pins the [data-conversation-scroll] viewport to the newest message", async ({ page }) => {
   await gotoHash(page, `${PREFIX}session-scroll`);
-  await expect
-    .poll(() => page.evaluate(() => window.__test.openCalls()))
-    .toEqual(["session-scroll"]);
+  await expect.poll(() => openCalls(page)).toEqual(["session-scroll"]);
   // pinToNewest polls until the content stops growing; give it time, then the
   // scroller must sit at its bottom.
+  const contentHeight = await page.evaluate(() => window.__test.contentHeight());
   await expect
     .poll(
       () =>
         page.evaluate(() => {
           const scroller = window.__test.scroller();
+          if (!scroller) return 0; // not found yet — keep polling
           return scroller.scrollTop + scroller.clientHeight;
         }),
       { timeout: 8000 }
     )
-    .toBeGreaterThanOrEqual(await page.evaluate(() => window.__test.contentHeight()) - 2);
+    .toBeGreaterThanOrEqual(contentHeight - 2);
 });
 
 test("retries opening until the sessions service is booted", async ({ page }) => {
@@ -75,12 +76,14 @@ test("retries opening until the sessions service is booted", async ({ page }) =>
   // Simulate the cold-open race: sessions not booted yet.
   await page.evaluate(() => window.__test.setSessionsBooted(false));
   await page.evaluate((h) => { window.location.hash = h; }, `#${PREFIX}session-late`);
-  // Boot arrives a moment later; openFromHash retries (every 250ms) until then.
-  await page.waitForTimeout(350);
-  await page.evaluate(() => window.__test.setSessionsBooted(true));
+  // The initial attempt returns no service and schedules a retry (every
+  // 250ms). Wait until at least one RETRY happened while still down, which
+  // proves the retry path — then boot the service.
   await expect
-    .poll(() => page.evaluate(() => window.__test.openCalls()))
-    .toEqual(["session-late"]);
+    .poll(() => page.evaluate(() => window.__test.sessionsGets()))
+    .toBeGreaterThanOrEqual(2);
+  await page.evaluate(() => window.__test.setSessionsBooted(true));
+  await expect.poll(() => openCalls(page)).toEqual(["session-late"]);
   await expect
     .poll(() => page.evaluate(() => window.location.hash))
     .toBe("");
@@ -91,8 +94,7 @@ test("cleanup removes the hashchange listener", async ({ page }) => {
   await page.waitForFunction(() => window.__test !== undefined);
   await page.evaluate(() => window.__test.cleanup());
   await page.evaluate((h) => { window.location.hash = h; }, `#${PREFIX}session-after-cleanup`);
-  await page.waitForTimeout(350);
-  expect(await page.evaluate(() => window.__test.openCalls())).toEqual([]);
-  // and the hash stays (no listener, nobody strips it)
+  // No listener is left, so nothing can schedule an open or strip the hash.
+  await expect.poll(() => openCalls(page)).toEqual([]);
   expect(await page.evaluate(() => window.location.hash)).toContain(PREFIX);
 });

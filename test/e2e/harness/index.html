@@ -56,7 +56,11 @@
       var cleanup = null;
       var ctx = {
         get: function (service) {
-          return service === "sessions" ? (booted ? sessions : undefined) : undefined;
+          if (service === "sessions") {
+            window.__sessionsGets = (window.__sessionsGets || 0) + 1;
+            return booted ? sessions : undefined;
+          }
+          return undefined;
         },
         effect: function (fn) {
           cleanup = fn();
@@ -68,6 +72,7 @@
         api: api,
         setSessionsBooted: function (b) { booted = b; },
         openCalls: function () { return window.__openCalls.slice(); },
+        sessionsGets: function () { return window.__sessionsGets || 0; },
         scroller: function () { return document.getElementById("scroller"); },
         contentHeight: function () { return document.getElementById("content").scrollHeight; },
         cleanup: function () { if (typeof cleanup === "function") cleanup(); }
