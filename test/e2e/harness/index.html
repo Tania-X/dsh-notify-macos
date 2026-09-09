@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dsh-notify-macos client harness</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; }
+  #scroller { overflow-y: auto; height: 260px; width: 480px; border: 1px solid #999; }
+  #scroller > div { padding: 2px 4px; }
+  #log { white-space: pre-wrap; font: 12px/1.4 monospace; }
+</style>
+</head>
+<body>
+  <!-- The scroller the real GUI marks with [data-conversation-scroll]. -->
+  <div id="scroller" data-conversation-scroll><div id="content"></div></div>
+  <pre id="log"></pre>
+
+  <!-- Module-loader stub must exist BEFORE client.js registers itself. -->
+  <script>
+    window.__openCalls = [];
+    window.__ModuleLoader__ = {
+      load: function (entry) { window.__entry = entry; }
+    };
+  </script>
+
+  <!-- The real client module under test (loaded as the web shell would). -->
+  <script src="/lib/client.js"></script>
+
+  <script>
+    // Boot driver mirrors the web shell: factory(require) -> api -> apply(ctx).
+    (function () {
+      function growContent() {
+        var c = document.getElementById("content");
+        for (var i = 0; i < 60; i++) {
+          var d = document.createElement("div");
+          d.textContent = "msg " + Math.random().toString(36).slice(2);
+          c.appendChild(d);
+        }
+      }
+
+      var entry = window.__entry;
+      if (!entry || entry.id !== "dsh-notify-macos") {
+        throw new Error("client entry was not registered");
+      }
+      var api = entry.factory(function () {
+        throw new Error("client.js must not require() anything in the harness");
+      });
+
+      var sessions = {
+        open: function (id) {
+          window.__openCalls.push(id);
+          growContent();
+        }
+      };
+      var booted = true;
+      var cleanup = null;
+      var ctx = {
+        get: function (service) {
+          if (service === "sessions") {
+            window.__sessionsGets = (window.__sessionsGets || 0) + 1;
+            return booted ? sessions : undefined;
+          }
+          return undefined;
+        },
+        effect: function (fn) {
+          cleanup = fn();
+          return {};
+        }
+      };
+
+      window.__test = {
+        api: api,
+        setSessionsBooted: function (b) { booted = b; },
+        openCalls: function () { return window.__openCalls.slice(); },
+        sessionsGets: function () { return window.__sessionsGets || 0; },
+        scroller: function () { return document.getElementById("scroller"); },
+        contentHeight: function () { return document.getElementById("content").scrollHeight; },
+        cleanup: function () { if (typeof cleanup === "function") cleanup(); }
+      };
+
+      api.apply(ctx);   // registers hashchange + handles any on-load jump hash
+    })();
+  </script>
+</body>
+</html>

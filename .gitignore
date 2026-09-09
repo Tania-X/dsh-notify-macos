@@ -3,3 +3,8 @@ node_modules/
 
 # npm local cache used under the file sandbox (avoid ~/.npm writes)
 .npm-cache/
+
+# Playwright local browser download (workspace-local, CI installs its own)
+.pw-browsers/
+test-results/
+playwright-report/
