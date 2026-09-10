@@ -15,6 +15,13 @@ public final class CardModel {
 
     public init() {}
 
+    /// Rebuild from persisted state (daemon restart / crash recovery).
+    /// Entries are kept as given; the UI shell recreates the rows in order.
+    public init(entries: [CompletionEntry], expanded: Bool) {
+        self.entries = entries
+        self.expanded = expanded
+    }
+
     // MARK: Queries
 
     public var completionCount: Int { entries.count }

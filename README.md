@@ -101,6 +101,8 @@ echo '{"cmd":"ping"}' | nc -U $TMPDIR/dsh-notify-macos.sock   # → {"ok":true}
 | `clickAction` | string | `"jump-web"` | 点击行为：`jump-web`（跳会话）/ `open-folder` / `open-web` / `none` |
 | `webUrl` | string | `"http://127.0.0.1:3080"` | Web UI 地址 |
 | `autoDismissSec` | number | `0` | 卡片自动消失秒数（`0` 常驻） |
+
+> 卡片栈会持久化到 `<socketPath>.cards.json`（原子写）：daemon 重启/崩溃后未处理的卡片自动恢复，卡片仍然“常驻直到你处理”。`state` 诊断命令可查当前卡数/条目数。
 | `socketPath` | string | `$TMPDIR/dsh-notify-macos.sock` | 与守护进程通信的 socket |
 | `serverPath` | string | 插件包内 `bin/dsh-notify-server` | 守护进程路径 |
 

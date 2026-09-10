@@ -78,6 +78,7 @@ final class NotificationCard: NSObject {
     let url: String?
     let window: NSWindow
     let view: CardView
+    let autoDismissSec: Double?
 
     /// Pure aggregation state machine (extracted to dshNotifyCore for tests).
     let model = CardModel()
@@ -98,6 +99,7 @@ final class NotificationCard: NSObject {
         self.action = action
         self.path = path
         self.url = url
+        self.autoDismissSec = autoDismissSec
         let rect = NSRect(x: 0, y: 0, width: NotificationCard.width, height: NotificationCard.collapsedHeight)
         self.view = CardView(frame: rect)
         self.window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -878,6 +880,76 @@ final class CardStack {
     private var cards: [NotificationCard] = []
     private let margin: CGFloat = 12
     private let gap: CGFloat = 8
+    /// Snapshot store so pending cards survive a daemon restart/crash.
+    private let store: CardStackStore?
+    /// True while rebuilding from disk (suppresses persist churn).
+    private var restoring = false
+
+    init(store: CardStackStore? = nil) {
+        self.store = store
+        restore()
+    }
+
+    /// Rebuild the cards from the on-disk snapshot.
+    private func restore() {
+        guard let store else { return }
+        let snapshot = store.load()
+        guard !snapshot.cards.isEmpty else { return }
+        restoring = true
+        for sc in snapshot.cards {
+            let card = NotificationCard(
+                sessionId: sc.sessionId,
+                sessionTitle: sc.sessionTitle,
+                action: sc.action,
+                path: sc.path,
+                url: sc.url,
+                autoDismissSec: sc.autoDismissSec
+            )
+            for entry in sc.entries {
+                card.addCompletion(
+                    message: entry.message,
+                    kind: OutcomeKind.parse(entry.kind),
+                    detail: entry.detail,
+                    at: entry.time
+                )
+            }
+            card.onRemoved = { [weak self] removed in
+                self?.remove(removed)
+            }
+            card.onToggleExpanded = { [weak self] _ in
+                self?.relayout(animated: true)
+            }
+            cards.append(card)
+            if sc.expanded { card.setExpanded(true) }
+        }
+        restoring = false
+        relayout(animated: false)
+        dshLog("[cards] restored \(cards.count) card(s) from \(store.url.path)\n")
+    }
+
+    /// Persist the current stack (no-op while restoring or without a store).
+    private func persist() {
+        guard let store, !restoring else { return }
+        let snapshot = CardStackSnapshot(cards: cards.map { card in
+            SnapshotCard(
+                sessionId: card.sessionId,
+                sessionTitle: card.sessionTitle,
+                action: card.action,
+                path: card.path,
+                url: card.url,
+                autoDismissSec: card.autoDismissSec,
+                expanded: card.expanded,
+                entries: card.entries.map(\.snapshot)
+            )
+        })
+        store.save(snapshot)
+    }
+
+    /// Diagnostic state (socket `state` command).
+    func stateSummary() -> String {
+        let entries = cards.reduce(0) { $0 + $1.completionCount }
+        return "{\"ok\":true,\"cards\":\(cards.count),\"entries\":\(entries)}"
+    }
 
     /// Show a completion. If a card for the same session already exists,
     /// merge into it (append entry, auto-expand optional); else create one.
@@ -931,6 +1003,7 @@ final class CardStack {
     }
 
     private func relayout(animated: Bool) {
+        defer { persist() }   // single hook: every structural change re-layouts
         guard let screen = NSScreen.main?.visibleFrame else { return }
         var y = screen.maxY - margin
         for card in cards {
@@ -1058,6 +1131,12 @@ final class SocketServer {
             }
         case "ping":
             reply("{\"ok\":true}\n")
+        case "state":
+            // Diagnostic: current card/entry counts (used by the smoke test to
+            // prove cards survive a daemon restart). Runs on the main thread
+            // because the stack owns AppKit windows.
+            let summary = DispatchQueue.main.sync { onState?() ?? "{\"ok\":false}" }
+            reply(summary + "\n")
         case "probe":
             // Health check: the daemon is up. (Browser automation probing was
             // removed — session jumps now use a hash deep link opened with the
@@ -1083,6 +1162,8 @@ final class SocketServer {
     }
 
     var onShow: ((ShowRequest) -> Void)?
+    /// Returns a JSON state summary for the `state` diagnostic command.
+    var onState: (() -> String)?
 }
 
 // MARK: - Main
@@ -1098,11 +1179,13 @@ if daemonAlreadyRunning(socketPath) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-let stack = CardStack()
+let cardStore = CardStackStore(url: URL(fileURLWithPath: socketPath + ".cards.json"))
+let stack = CardStack(store: cardStore)
 let server = SocketServer(path: socketPath)
 server.onShow = { request in
     stack.show(request: request)
 }
+server.onState = { stack.stateSummary() }
 server.start()
 
 app.run()
