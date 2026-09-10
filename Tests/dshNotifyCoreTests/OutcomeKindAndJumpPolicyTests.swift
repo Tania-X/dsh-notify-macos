@@ -45,13 +45,67 @@ final class JumpPolicyTests: XCTestCase {
     }
 
     func testCatalogShape() {
-        XCTAssertEqual(BrowserCatalog.candidates, [
-            "Safari", "Google Chrome", "Microsoft Edge", "Brave Browser", "Arc", "Opera",
-        ])
-        for name in BrowserCatalog.candidates {
-            XCTAssertNotNil(BrowserCatalog.bundleIds[name], "bundle ids missing for \(name)")
-            XCTAssertFalse(BrowserCatalog.bundleIds[name]!.isEmpty)
+        XCTAssertEqual(BrowserCatalog.families.map(\.key),
+                       ["Safari", "Google Chrome", "Microsoft Edge", "Brave Browser", "Arc", "Opera"])
+        XCTAssertEqual(BrowserCatalog.families.first?.channels,
+                       [BrowserChannel(appName: "Safari", bundleId: "com.apple.Safari")])
+        // every channel must carry an AppleScript-resolvable name + bundle id
+        for family in BrowserCatalog.families {
+            XCTAssertFalse(family.channels.isEmpty, "\(family.key) has no channels")
+            for channel in family.channels {
+                XCTAssertFalse(channel.appName.isEmpty)
+                XCTAssertFalse(channel.bundleId.isEmpty)
+            }
         }
-        XCTAssertEqual(BrowserCatalog.bundleIds["Safari"], ["com.apple.Safari"])
+    }
+
+    func testRunningChannelResolvesInstalledChannel() {
+        let edge = BrowserCatalog.families.first { $0.key == "Microsoft Edge" }!
+        // Only Edge Dev installed (the machine that surfaced the -2740 bug):
+        // AppleScript needs "Microsoft Edge Dev", NOT "Microsoft Edge".
+        XCTAssertEqual(
+            BrowserCatalog.runningChannel(for: edge, runningBundleIds: ["com.microsoft.edgemac.Dev"])?.appName,
+            "Microsoft Edge Dev"
+        )
+        // Stable + Dev both running → prefer the stable build.
+        XCTAssertEqual(
+            BrowserCatalog.runningChannel(
+                for: edge, runningBundleIds: ["com.microsoft.edgemac", "com.microsoft.edgemac.Dev"]
+            )?.appName,
+            "Microsoft Edge"
+        )
+        XCTAssertNil(BrowserCatalog.runningChannel(for: edge, runningBundleIds: ["com.apple.Safari"]))
+    }
+
+    func testChannelReverseLookup() {
+        XCTAssertEqual(BrowserCatalog.channel(appName: "Microsoft Edge Dev")?.bundleId,
+                       "com.microsoft.edgemac.Dev")
+        XCTAssertEqual(BrowserCatalog.channel(appName: "Safari")?.bundleId, "com.apple.Safari")
+        XCTAssertNil(BrowserCatalog.channel(appName: "Firefox"))
+    }
+
+    func testProbeOrderOnlyIncludesRunningBrowsers() {
+        // Safari + Edge Dev running; Edge must be named by its channel.
+        XCTAssertEqual(
+            BrowserCatalog.probeOrder(runningBundleIds: ["com.apple.Safari", "com.microsoft.edgemac.Dev"],
+                                      preferring: nil),
+            ["Safari", "Microsoft Edge Dev"]
+        )
+        // Last successful browser jumps the queue.
+        XCTAssertEqual(
+            BrowserCatalog.probeOrder(runningBundleIds: ["com.apple.Safari", "com.microsoft.edgemac.Dev"],
+                                      preferring: "Microsoft Edge Dev"),
+            ["Microsoft Edge Dev", "Safari"]
+        )
+        // Nothing running → nothing to probe (no fallback churn).
+        XCTAssertEqual(BrowserCatalog.probeOrder(runningBundleIds: [], preferring: nil), [])
+    }
+
+    func testFallbackOnlyWhenNoDenial() {
+        // Denied pass: the browser is there but undrivable — opening a URL would
+        // spawn a new tab and reload the GUI, so it must be refused.
+        XCTAssertFalse(JumpPolicy.shouldOpenFallback(sawDenied: true))
+        // Clean pass (browser reachable, no hosting tab) → GUI is not open.
+        XCTAssertTrue(JumpPolicy.shouldOpenFallback(sawDenied: false))
     }
 }
