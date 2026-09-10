@@ -126,8 +126,12 @@ final class NotificationCard: NSObject {
         window.ignoresMouseEvents = false
         window.contentView = view
         window.title = "dsh-notify \(sessionTitle)"
-        if let autoDismissSec, autoDismissSec > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + autoDismissSec) { [weak self] in
+        // Schedule from the absolute deadline when we have one (a restored
+        // card resumes with exactly the time it had left), else from the
+        // configured seconds.
+        let delay = autoDismissDeadline.map { $0.timeIntervalSinceNow } ?? (autoDismissSec ?? 0)
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.dismiss()
             }
         }
@@ -962,12 +966,23 @@ final class CardStack {
         // Give expanded cards their real height before the single relayout.
         for card in cards { card.updateFrame() }
         relayout(animated: false)
+        if cards.isEmpty {
+            // Every snapshot entry was expired: drop the stale file so it is
+            // not re-read (and re-skipped) on the next start.
+            store.clear()
+            dshLog("[cards] all restored cards expired; snapshot cleared\n")
+        }
         dshLog("[cards] restored \(cards.count) card(s) from \(store.url.path)\n")
     }
 
     /// Persist the current stack (no-op while restoring or without a store).
     private func persist() {
         guard let store, !restoring else { return }
+        guard !cards.isEmpty else {
+            // Empty stack: remove the file instead of leaving an empty snapshot.
+            store.clear()
+            return
+        }
         let snapshot = CardStackSnapshot(cards: cards.map { card in
             SnapshotCard(
                 sessionId: card.sessionId,
@@ -1134,21 +1149,25 @@ final class SocketServer {
                 break
             }
         }
+        var deferred = false
         if !buffer.isEmpty {
-            processLine(buffer, replyTo: client)
+            deferred = processLine(buffer, replyTo: client)
         }
-        close(client)
+        if !deferred { close(client) }
     }
 
-    private func processLine(_ data: Data, replyTo fd: Int32) {
+    /// Handle one request. Returns true when the reply is written
+    /// asynchronously (the caller must then leave the fd open).
+    @discardableResult
+    private func processLine(_ data: Data, replyTo fd: Int32) -> Bool {
         // Write a reply (one JSON line) back to the client.
         func reply(_ text: String) {
             text.withCString { ptr in
                 _ = Darwin.write(fd, ptr, text.utf8.count)
             }
         }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        guard let cmd = object["cmd"] as? String else { return }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        guard let cmd = object["cmd"] as? String else { return false }
         switch cmd {
         case "show":
             let request = ShowRequest(
@@ -1172,18 +1191,16 @@ final class SocketServer {
             reply("{\"ok\":true}\n")
         case "state":
             // Diagnostic: current card/entry counts (used by the smoke test to
-            // prove cards survive a daemon restart). Runs on the main thread
-            // because the stack owns AppKit windows.
-            var summary = "{\"ok\":false}"
-            let done = DispatchSemaphore(value: 0)
+            // prove cards survive a daemon restart). The stack owns AppKit
+            // windows, so the answer is computed on the main thread — WITHOUT
+            // blocking this socket thread (a jump can hold the main thread in
+            // osascript for seconds).
             DispatchQueue.main.async { [weak self] in
-                summary = self?.onState?() ?? "{\"ok\":false}"
-                done.signal()
+                let summary = self?.onState?() ?? "{\"ok\":false}"
+                reply(summary + "\n")
+                close(fd)
             }
-            if done.wait(timeout: .now() + 2) == .timedOut {
-                summary = "{\"ok\":false,\"error\":\"state timeout\"}"
-            }
-            reply(summary + "\n")
+            return true
         case "probe":
             // Health check: the daemon is up. (Browser automation probing was
             // removed — session jumps now use a hash deep link opened with the
@@ -1206,6 +1223,7 @@ final class SocketServer {
         default:
             break
         }
+        return false
     }
 
     var onShow: ((ShowRequest) -> Void)?
