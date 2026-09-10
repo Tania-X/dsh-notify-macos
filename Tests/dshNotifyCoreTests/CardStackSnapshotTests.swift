@@ -94,11 +94,9 @@ final class CardStackSnapshotTests: XCTestCase {
         store.clear()
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
-}
 
     // MARK: auto-dismiss deadline (restart must not reset the countdown)
-
-    private func card(autoDismissSec: Double?, deadline: Date?) -> SnapshotCard {
+private func card(autoDismissSec: Double?, deadline: Date?) -> SnapshotCard {
         SnapshotCard(
             sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
             autoDismissSec: autoDismissSec, deadline: deadline, expanded: false,
