@@ -30,12 +30,16 @@ public struct SnapshotCard: Codable, Equatable {
     public var path: String?
     public var url: String?
     public var autoDismissSec: Double?
+    /// Absolute auto-dismiss deadline (set when the card was first shown), so
+    /// a restart cannot reset the countdown or resurrect an expired card.
+    public var deadline: Date?
     public var expanded: Bool
     public var entries: [SnapshotEntry]
 
     public init(
         sessionId: String?, sessionTitle: String, action: String, path: String?,
-        url: String?, autoDismissSec: Double?, expanded: Bool, entries: [SnapshotEntry]
+        url: String?, autoDismissSec: Double?, deadline: Date? = nil,
+        expanded: Bool, entries: [SnapshotEntry]
     ) {
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
@@ -43,6 +47,7 @@ public struct SnapshotCard: Codable, Equatable {
         self.path = path
         self.url = url
         self.autoDismissSec = autoDismissSec
+        self.deadline = deadline
         self.expanded = expanded
         self.entries = entries
     }
@@ -75,5 +80,22 @@ public extension CompletionEntry {
             detail: snapshot.detail,
             index: snapshot.index
         )
+    }
+}
+
+public extension SnapshotCard {
+    /// True when the card had an auto-dismiss deadline that has already passed.
+    public func isExpired(at now: Date = Date()) -> Bool {
+        guard let deadline else { return false }
+        return deadline <= now
+    }
+
+    /// Auto-dismiss seconds to re-arm after a restart: nil when the card is
+    /// permanent or carries no deadline (legacy), the remaining time when it
+    /// still has some, and nil when it already expired (caller skips the card).
+    public func remainingAutoDismiss(at now: Date = Date()) -> Double? {
+        guard let deadline else { return autoDismissSec }
+        let remaining = deadline.timeIntervalSince(now)
+        return remaining > 0 ? remaining : nil
     }
 }

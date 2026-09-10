@@ -79,6 +79,8 @@ final class NotificationCard: NSObject {
     let window: NSWindow
     let view: CardView
     let autoDismissSec: Double?
+    /// Absolute auto-dismiss deadline, persisted so a restart cannot reset it.
+    let autoDismissDeadline: Date?
 
     /// Pure aggregation state machine (extracted to dshNotifyCore for tests).
     let model = CardModel()
@@ -100,6 +102,9 @@ final class NotificationCard: NSObject {
         self.path = path
         self.url = url
         self.autoDismissSec = autoDismissSec
+        self.autoDismissDeadline = (autoDismissSec ?? 0) > 0
+            ? Date().addingTimeInterval(autoDismissSec ?? 0)
+            : nil
         let rect = NSRect(x: 0, y: 0, width: NotificationCard.width, height: NotificationCard.collapsedHeight)
         self.view = CardView(frame: rect)
         self.window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -893,17 +898,38 @@ final class CardStack {
     /// Rebuild the cards from the on-disk snapshot.
     private func restore() {
         guard let store else { return }
-        let snapshot = store.load()
+        let (snapshot, diagnostic) = store.loadWithDiagnostic()
+        switch diagnostic {
+        case .loaded(let count):
+            dshLog("[cards] snapshot loaded: \(count) card(s)\n")
+        case .missing:
+            break
+        case .unreadable:
+            dshLog("[cards] snapshot unreadable; starting empty\n")
+        case .corrupt:
+            dshLog("[cards] snapshot corrupt; backing up and starting empty\n")
+            store.backUp()
+        case .versionMismatch(let found, let expected):
+            dshLog("[cards] snapshot version \(found) != \(expected); backing up and starting empty\n")
+            store.backUp()
+        }
         guard !snapshot.cards.isEmpty else { return }
         restoring = true
         for sc in snapshot.cards {
+            // Expired auto-dismiss cards stay gone; the rest resume with the
+            // remaining time instead of a fresh full countdown.
+            let now = Date()
+            if sc.isExpired(at: now) {
+                dshLog("[cards] skipping expired card \(sc.sessionTitle)\n")
+                continue
+            }
             let card = NotificationCard(
                 sessionId: sc.sessionId,
                 sessionTitle: sc.sessionTitle,
                 action: sc.action,
                 path: sc.path,
                 url: sc.url,
-                autoDismissSec: sc.autoDismissSec
+                autoDismissSec: sc.remainingAutoDismiss(at: now)
             )
             for entry in sc.entries {
                 card.addCompletion(
@@ -938,6 +964,7 @@ final class CardStack {
                 path: card.path,
                 url: card.url,
                 autoDismissSec: card.autoDismissSec,
+                deadline: card.autoDismissDeadline,
                 expanded: card.expanded,
                 entries: card.entries.map(\.snapshot)
             )

@@ -42,7 +42,8 @@ final class CardStackSnapshotTests: XCTestCase {
         let snapshot = CardStackSnapshot(cards: [
             SnapshotCard(
                 sessionId: "session-1", sessionTitle: "T", action: "jump-web",
-                path: nil, url: "http://127.0.0.1:3080", autoDismissSec: nil,
+                path: nil, url: "http://127.0.0.1:3080", autoDismissSec: 30,
+                deadline: t0.addingTimeInterval(30),
                 expanded: true,
                 entries: [
                     SnapshotEntry(message: "done", time: t0, kind: "completed", detail: nil, index: 1),
@@ -55,6 +56,7 @@ final class CardStackSnapshotTests: XCTestCase {
         XCTAssertEqual(loaded, snapshot)
         XCTAssertEqual(loaded.cards.first?.entries.map(\.kind), ["completed", "blocked"])
         XCTAssertEqual(loaded.cards.first?.expanded, true)
+        XCTAssertEqual(loaded.cards.first?.deadline, t0.addingTimeInterval(30))
     }
 
     func testStoreYieldsEmptyOnMissingOrCorruptFile() throws {
@@ -91,5 +93,41 @@ final class CardStackSnapshotTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         store.clear()
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+}
+
+    // MARK: auto-dismiss deadline (restart must not reset the countdown)
+
+    private func card(autoDismissSec: Double?, deadline: Date?) -> SnapshotCard {
+        SnapshotCard(
+            sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+            autoDismissSec: autoDismissSec, deadline: deadline, expanded: false,
+            entries: [SnapshotEntry(message: "m", time: t0, kind: "completed", detail: nil, index: 1)]
+        )
+    }
+
+    func testExpiredDeadlineMeansCardIsNotRestored() {
+        let expired = card(autoDismissSec: 5, deadline: t0)   // deadline long past
+        XCTAssertTrue(expired.isExpired(at: t0.addingTimeInterval(1)))
+        XCTAssertNil(expired.remainingAutoDismiss(at: t0.addingTimeInterval(1)))
+    }
+
+    func testLiveDeadlineResumesWithRemainingTime() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let live = card(autoDismissSec: 10, deadline: now.addingTimeInterval(4))
+        XCTAssertFalse(live.isExpired(at: now))
+        XCTAssertEqual(live.remainingAutoDismiss(at: now) ?? 0, 4, accuracy: 0.001)
+    }
+
+    func testLegacyCardWithoutDeadlineKeepsConfiguredSeconds() {
+        let legacy = card(autoDismissSec: 3, deadline: nil)
+        XCTAssertFalse(legacy.isExpired(at: t0))
+        XCTAssertEqual(legacy.remainingAutoDismiss(at: t0), 3)
+    }
+
+    func testPermanentCardHasNoRemainingTimer() {
+        let permanent = card(autoDismissSec: nil, deadline: nil)
+        XCTAssertFalse(permanent.isExpired(at: t0))
+        XCTAssertNil(permanent.remainingAutoDismiss(at: t0))
     }
 }
