@@ -16,23 +16,21 @@ final class OutcomeKindTests: XCTestCase {
 }
 
 final class JumpPolicyTests: XCTestCase {
-    func testProbeOrderWithoutPreferenceKeepsCatalogOrder() {
-        XCTAssertEqual(JumpPolicy.probeOrder(candidates: BrowserCatalog.candidates, preferring: nil),
-                       BrowserCatalog.candidates)
+    /// Names as the daemon resolves them at runtime (channels, not families).
+    private let probeNames = ["Safari", "Google Chrome", "Microsoft Edge Dev"]
+
+    func testProbeOrderWithoutPreferenceKeepsGivenOrder() {
+        XCTAssertEqual(JumpPolicy.probeOrder(candidates: probeNames, preferring: nil), probeNames)
     }
 
     func testProbeOrderMovesLastSuccessToFrontPreservingRest() {
-        let order = JumpPolicy.probeOrder(
-            candidates: BrowserCatalog.candidates,
-            preferring: "Microsoft Edge"
-        )
-        XCTAssertEqual(order.first, "Microsoft Edge")
-        XCTAssertEqual(Set(order), Set(BrowserCatalog.candidates))
+        let order = JumpPolicy.probeOrder(candidates: probeNames, preferring: "Microsoft Edge Dev")
+        XCTAssertEqual(order, ["Microsoft Edge Dev", "Safari", "Google Chrome"])
+        XCTAssertEqual(Set(order), Set(probeNames))
     }
 
     func testProbeOrderUnknownPreferenceIsIgnored() {
-        XCTAssertEqual(JumpPolicy.probeOrder(candidates: BrowserCatalog.candidates, preferring: "Firefox"),
-                       BrowserCatalog.candidates)
+        XCTAssertEqual(JumpPolicy.probeOrder(candidates: probeNames, preferring: "Firefox"), probeNames)
     }
 
     func testShouldRetryOnlyWhenDeniedAndPassesRemain() {
