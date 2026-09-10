@@ -14,6 +14,7 @@ set -u
 BIN="${1:-bin/dsh-notify-server}"
 SOCK="/tmp/dsh-notify-smoke.sock"
 LOG="/tmp/dsh-notify-smoke.log"
+CARDS="/tmp/dsh-notify-smoke.sock.cards.json"
 PASS=0; FAIL=0
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -40,9 +41,14 @@ for obj in frames:
 PYEOF
 }
 
+# jget JSON FIELD — print one field of a JSON reply.
+jget() {
+  python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get(sys.argv[2]))' "$1" "$2" 2>/dev/null
+}
+
 echo "== smoke: $BIN (socket $SOCK) =="
 [ -x "$BIN" ] || { echo "binary missing: $BIN"; exit 2; }
-rm -f "$SOCK" "$LOG"
+rm -f "$SOCK" "$LOG" "$CARDS"
 
 # --- start daemon ---
 "$BIN" "$SOCK" >"$LOG" 2>&1 &
@@ -81,9 +87,31 @@ fi
 sleep 0.6
 kill -0 "$DPID" 2>/dev/null && ok "daemon alive after frames" || bad "daemon died after frames"
 
+# --- diagnostic state: 6 cards / 7 entries as pushed above ---
+S1=$(py '[{"cmd":"state"}]')
+C1=$(jget "$S1" cards); E1=$(jget "$S1" entries)
+if [ "$C1" = "6" ] && [ "$E1" = "7" ]; then
+  ok "state reports 6 cards / 7 entries"
+else
+  bad "state mismatch: $S1"
+fi
+
+# --- persistence: cards must survive a daemon restart ---
+kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
+"$BIN" "$SOCK" >"$LOG.restart" 2>&1 &
+DPID=$!
+sleep 1.2
+S2=$(py '[{"cmd":"state"}]')
+C2=$(jget "$S2" cards); E2=$(jget "$S2" entries)
+if [ "$C2" = "$C1" ] && [ "$E2" = "$E1" ] && [ -n "$C2" ]; then
+  ok "cards restored after restart ($C2 cards / $E2 entries)"
+else
+  bad "restore mismatch: before=$S1 after=$S2"
+fi
+
 # --- clean shutdown ---
 kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
-rm -f "$SOCK"
+rm -f "$SOCK" "$CARDS"
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

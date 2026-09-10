@@ -78,6 +78,9 @@ final class NotificationCard: NSObject {
     let url: String?
     let window: NSWindow
     let view: CardView
+    let autoDismissSec: Double?
+    /// Absolute auto-dismiss deadline, persisted so a restart cannot reset it.
+    let autoDismissDeadline: Date?
 
     /// Pure aggregation state machine (extracted to dshNotifyCore for tests).
     let model = CardModel()
@@ -92,12 +95,22 @@ final class NotificationCard: NSObject {
     static let rowHeight: CGFloat = 30
     static let collapsedHeight = headerHeight
 
-    init(sessionId: String?, sessionTitle: String, action: String, path: String?, url: String?, autoDismissSec: Double? = nil) {
+    init(
+        sessionId: String?, sessionTitle: String, action: String, path: String?, url: String?,
+        autoDismissSec: Double? = nil, deadline: Date? = nil
+    ) {
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
         self.action = action
         self.path = path
         self.url = url
+        self.autoDismissSec = autoDismissSec
+        // Restored cards keep their original absolute deadline (recomputing it
+        // as now+remaining would drift a little on every restart and the drift
+        // would be written back to disk).
+        self.autoDismissDeadline = deadline ?? ((autoDismissSec ?? 0) > 0
+            ? Date().addingTimeInterval(autoDismissSec ?? 0)
+            : nil)
         let rect = NSRect(x: 0, y: 0, width: NotificationCard.width, height: NotificationCard.collapsedHeight)
         self.view = CardView(frame: rect)
         self.window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -113,8 +126,12 @@ final class NotificationCard: NSObject {
         window.ignoresMouseEvents = false
         window.contentView = view
         window.title = "dsh-notify \(sessionTitle)"
-        if let autoDismissSec, autoDismissSec > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + autoDismissSec) { [weak self] in
+        // Schedule from the absolute deadline when we have one (a restored
+        // card resumes with exactly the time it had left), else from the
+        // configured seconds.
+        let delay = autoDismissDeadline.map { $0.timeIntervalSinceNow } ?? (autoDismissSec ?? 0)
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.dismiss()
             }
         }
@@ -878,6 +895,115 @@ final class CardStack {
     private var cards: [NotificationCard] = []
     private let margin: CGFloat = 12
     private let gap: CGFloat = 8
+    /// Snapshot store so pending cards survive a daemon restart/crash.
+    private let store: CardStackStore?
+    /// True while rebuilding from disk (suppresses persist churn).
+    private var restoring = false
+
+    init(store: CardStackStore? = nil) {
+        self.store = store
+        restore()
+    }
+
+    /// Rebuild the cards from the on-disk snapshot.
+    private func restore() {
+        guard let store else { return }
+        let (snapshot, diagnostic) = store.loadWithDiagnostic()
+        switch diagnostic {
+        case .loaded(let count):
+            dshLog("[cards] snapshot loaded: \(count) card(s)\n")
+        case .missing:
+            break
+        case .unreadable:
+            dshLog("[cards] snapshot unreadable; starting empty\n")
+        case .corrupt:
+            dshLog("[cards] snapshot corrupt; backing up and starting empty\n")
+            store.backUp()
+        case .versionMismatch(let found, let expected):
+            dshLog("[cards] snapshot version \(found) != \(expected); backing up and starting empty\n")
+            store.backUp()
+        }
+        guard !snapshot.cards.isEmpty else { return }
+        restoring = true
+        // `defer` so a failure can never leave persistence disabled forever.
+        defer { restoring = false }
+        for sc in snapshot.cards {
+            // Expired auto-dismiss cards stay gone; the rest resume with the
+            // remaining time instead of a fresh full countdown.
+            let now = Date()
+            if sc.isExpired(at: now) {
+                dshLog("[cards] skipping expired card \(sc.sessionTitle)\n")
+                continue
+            }
+            let card = NotificationCard(
+                sessionId: sc.sessionId,
+                sessionTitle: sc.sessionTitle,
+                action: sc.action,
+                path: sc.path,
+                url: sc.url,
+                autoDismissSec: sc.remainingAutoDismiss(at: now),
+                deadline: sc.deadline
+            )
+            for entry in sc.entries {
+                card.addCompletion(
+                    message: entry.message,
+                    kind: OutcomeKind.parse(entry.kind),
+                    detail: entry.detail,
+                    at: entry.time
+                )
+            }
+            card.onRemoved = { [weak self] removed in
+                self?.remove(removed)
+            }
+            card.onToggleExpanded = { [weak self] _ in
+                self?.relayout(animated: true)
+            }
+            cards.append(card)
+            // Change the model directly: card.setExpanded() would fire the
+            // UI callback (relayout per card) while the stack is half-built.
+            if sc.expanded { card.model.setExpanded(true) }
+        }
+        // Give expanded cards their real height before the single relayout.
+        for card in cards { card.updateFrame() }
+        relayout(animated: false)
+        if cards.isEmpty {
+            // Every snapshot entry was expired: drop the stale file so it is
+            // not re-read (and re-skipped) on the next start.
+            store.clear()
+            dshLog("[cards] all restored cards expired; snapshot cleared\n")
+        }
+        dshLog("[cards] restored \(cards.count) card(s) from \(store.url.path)\n")
+    }
+
+    /// Persist the current stack (no-op while restoring or without a store).
+    private func persist() {
+        guard let store, !restoring else { return }
+        guard !cards.isEmpty else {
+            // Empty stack: remove the file instead of leaving an empty snapshot.
+            store.clear()
+            return
+        }
+        let snapshot = CardStackSnapshot(cards: cards.map { card in
+            SnapshotCard(
+                sessionId: card.sessionId,
+                sessionTitle: card.sessionTitle,
+                action: card.action,
+                path: card.path,
+                url: card.url,
+                autoDismissSec: card.autoDismissSec,
+                deadline: card.autoDismissDeadline,
+                expanded: card.expanded,
+                entries: card.entries.map(\.snapshot)
+            )
+        })
+        store.save(snapshot)
+    }
+
+    /// Diagnostic state (socket `state` command).
+    func stateSummary() -> String {
+        let entries = cards.reduce(0) { $0 + $1.completionCount }
+        return "{\"ok\":true,\"cards\":\(cards.count),\"entries\":\(entries)}"
+    }
 
     /// Show a completion. If a card for the same session already exists,
     /// merge into it (append entry, auto-expand optional); else create one.
@@ -931,6 +1057,7 @@ final class CardStack {
     }
 
     private func relayout(animated: Bool) {
+        defer { persist() }   // single hook: every structural change re-layouts
         guard let screen = NSScreen.main?.visibleFrame else { return }
         var y = screen.maxY - margin
         for card in cards {
@@ -1022,21 +1149,25 @@ final class SocketServer {
                 break
             }
         }
+        var deferred = false
         if !buffer.isEmpty {
-            processLine(buffer, replyTo: client)
+            deferred = processLine(buffer, replyTo: client)
         }
-        close(client)
+        if !deferred { close(client) }
     }
 
-    private func processLine(_ data: Data, replyTo fd: Int32) {
+    /// Handle one request. Returns true when the reply is written
+    /// asynchronously (the caller must then leave the fd open).
+    @discardableResult
+    private func processLine(_ data: Data, replyTo fd: Int32) -> Bool {
         // Write a reply (one JSON line) back to the client.
         func reply(_ text: String) {
             text.withCString { ptr in
                 _ = Darwin.write(fd, ptr, text.utf8.count)
             }
         }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        guard let cmd = object["cmd"] as? String else { return }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        guard let cmd = object["cmd"] as? String else { return false }
         switch cmd {
         case "show":
             let request = ShowRequest(
@@ -1058,6 +1189,18 @@ final class SocketServer {
             }
         case "ping":
             reply("{\"ok\":true}\n")
+        case "state":
+            // Diagnostic: current card/entry counts (used by the smoke test to
+            // prove cards survive a daemon restart). The stack owns AppKit
+            // windows, so the answer is computed on the main thread — WITHOUT
+            // blocking this socket thread (a jump can hold the main thread in
+            // osascript for seconds).
+            DispatchQueue.main.async { [weak self] in
+                let summary = self?.onState?() ?? "{\"ok\":false}"
+                reply(summary + "\n")
+                close(fd)
+            }
+            return true
         case "probe":
             // Health check: the daemon is up. (Browser automation probing was
             // removed — session jumps now use a hash deep link opened with the
@@ -1080,9 +1223,12 @@ final class SocketServer {
         default:
             break
         }
+        return false
     }
 
     var onShow: ((ShowRequest) -> Void)?
+    /// Returns a JSON state summary for the `state` diagnostic command.
+    var onState: (() -> String)?
 }
 
 // MARK: - Main
@@ -1098,11 +1244,13 @@ if daemonAlreadyRunning(socketPath) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-let stack = CardStack()
+let cardStore = CardStackStore(url: URL(fileURLWithPath: socketPath + ".cards.json"))
+let stack = CardStack(store: cardStore)
 let server = SocketServer(path: socketPath)
 server.onShow = { request in
     stack.show(request: request)
 }
+server.onState = { stack.stateSummary() }
 server.start()
 
 app.run()
