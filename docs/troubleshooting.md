@@ -148,3 +148,8 @@ daemon 从单文件（`bin/dsh-notify-server.swift` + `swiftc`）改为 SwiftPM 
   3. 纯换算逻辑（spaces 归属 → 专属锚点集合 / bounds 匹配）抽进 `dshNotifyCore` 加 XCTest；
   4. 全程兜底：spaces 解析失败/无锚点 → 日志 + 退回现状直连。
 - 实施前建议先做 H1/H2 取证（加点击分支日志），避免把精力押在 H3 上。
+
+### Backlog（记录，未实施）
+- **点击分支诊断日志**（低成本、无行为变化）：在 `CardView.mouseUp` 记录 —— 点击分支（header 展开/收起 vs 行跳转 vs 拖拽）、卡条目数、点击瞬间 `NSWorkspace.frontmostApplication`、承载窗口是否在屏。用于把「时灵时不灵」自动收敛到 H1/H2/H3，而无需稳定复现。
+- 同会话跳转的可见反馈（如卡上提示/短暂高亮），消除 H2 的“隐形”困惑。
+- 聚合卡 header 点击的语义再评估（是否也应提供跳转入口）。
