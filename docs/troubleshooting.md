@@ -114,3 +114,42 @@ daemon 从单文件（`bin/dsh-notify-server.swift` + `swiftc`）改为 SwiftPM 
 1. **沙箱/受限 shell 里 `swift build` 报 `Operation not permitted`**：SwiftPM 的 manifest 缓存写 `~/Library/Caches/org.swift.swiftpm`，clang module cache 写 `/var/folders/…/C/clang/ModuleCache`——都在工作区外，文件沙箱挡得住。`swiftc` 单文件时代可用 `-module-cache-path <工作区内路径>` 规避；**SwiftPM 的 manifest 编译步无法重定向该路径**（`-Xcc -fmodules-cache-path` 只作用于 target 编译），只能给足权限或在 CI 上构建。
 2. **Command Line Tools 没有 XCTest**：`swift test` 会报 `error: XCTest not available`（且 `xcrun --show-sdk-platform-path` 失败）。Core 的测试套件需完整 Xcode 或 CI（macOS runner 自带 Xcode）。全绿证据由 `.github/workflows/tests.yml`（随 PR #4 进入 main）的 `swift tests (XCTest)` job 提供；CLT 本机只能 `swift build` 验证编译。
 3. **产物路径变了**：`swift build -c release` 产物在 `.build/release/dsh-notify-server`，需 `cp` 到 `bin/dsh-notify-server`（插件 `serverPath` 默认指向包内 `bin/`）。仓库内 `bin/dsh-notify-server` 是提交的二进制产物，源码在 `Sources/`（`bin/*.swift` 已移除）。
+
+## 16. 点卡跳转「有时灵有时不灵」—— 排查笔记（2026-09-10，思考中）
+
+### 现象
+- blocked 类真实事件（审批/ask_user_question）点卡后**时而**能跳转定位、**时而**“点了一点反应都没有”（卡片会消失）；无法稳定复现。
+- 一次明确观测：卡片消失、daemon 日志确认已执行 `navigated tab in Safari`（PR #7 深链修复在跑），但**视觉上只把“当前桌面”的 Safari 带到了前台，没有切到 GUI 所在桌面的 Safari** —— 指向 §14 的跨桌面激活局限。
+- 但同一现象有时又完全正常 —— 说明存在未被控制的**条件变量**，不能急着归因到 §14。
+
+### 已知事实（证据）
+1. PR #7 后 blocked 点击 = 深链跳转到卡片会话（日志 `focusOnly=false` + `navigated`），会话定位本身正确。
+2. **事件就在当前会话时，深链跳到同一会话 + 滚到最新 ≈ 视觉上零变化** —— “没跳转”可能是同会话的固有隐形（我们测试几乎都在当前会话里点）。
+3. 跨桌面时，macOS `activate` 只抬当前桌面该应用的窗口；当前桌面若有 Safari 窗口（如 GitHub 窗口），激活的是它，不切 GUI 桌面（§14）。
+4. 聚合卡（≥2 条目）**点 header = 只展开/收起**，**点行才跳转** —— 若用户点的是 header 区域，本来就不该跳；这是“时灵时不灵”的最大嫌疑之一。
+
+### 候选假设（按嫌疑排序，待取证）
+- **H1（最可疑）：点击位置在聚合卡的 header 而非行** —— 事件多（blocked+completed 合并）后卡变聚合，点 header 无跳转是“设计如此”，但用户感知为 bug。
+- **H2：事件会话 == 当前会话** → 跳转隐形（深链已执行，画面无变化）。
+- **H3：跨桌面激活局限（§14）** → 从有 Safari 窗口的非 GUI 桌面点卡时，只抬当前桌面 Safari、不切 GUI 桌面。
+- H1/H2/H3 可能叠加（聚合卡 header + 同会话 + 跨桌面）。
+
+### 方法论（对无法稳定复现的 bug）
+1. **列条件变量 + 建矩阵**：每次出现/不出现时记录 —— 卡是单行还是聚合？点的 header 还是行？事件会话是否等于当前 GUI 会话？点击时在哪个桌面、该桌面有没有 Safari 窗口？GUI 的 Safari 是否前台？
+2. **留痕优先于复现**：加结构化日志（点击分支 header/row、卡条目数、点击时 frontmost app、GUI 窗口是否 on-screen），让下次出现时日志自动留下证据，而不是靠人复述。
+3. **把交互路径脚本化/可注入**：能枚举条件（如 debug 模拟“从桌面 X 点卡”）就不依赖真人碰运气。
+4. **按“消除整类歧义”改进而非“修某个复现”**：例如给 header 点击也提供明确反馈（或允许跳转）、同会话跳转给可见反馈 —— 即使复现不稳定，这些是确定性的体验改进。
+5. **二分验证 H1**：下次不跳时先看卡是不是多行的聚合卡 + 点击位置；H1 若成立，代价最低。
+
+### 待实施（若需根治跨桌面）
+- §14 的**锚点两步切换**落地计划：
+  1. 判定“GUI 窗口是否在当前屏”（`CGWindowList(.optionOnScreenOnly)` + AppleScript bounds ↔ CG bounds 匹配）→ 在 GUI 桌面则走现状直连，避免闪烁；
+  2. 不在 → 用 `com.apple.spaces` 窗口归属定位 GUI 窗口所在 Space，挑一个“只在该 Space 有窗口的运行中应用”激活（无副作用切桌面）→ sleep ~0.4s → 再跑现有浏览器激活；
+  3. 纯换算逻辑（spaces 归属 → 专属锚点集合 / bounds 匹配）抽进 `dshNotifyCore` 加 XCTest；
+  4. 全程兜底：spaces 解析失败/无锚点 → 日志 + 退回现状直连。
+- 实施前建议先做 H1/H2 取证（加点击分支日志），避免把精力押在 H3 上。
+
+### Backlog（记录，未实施）
+- **点击分支诊断日志**（低成本、无行为变化）：在 `CardView.mouseUp` 记录 —— 点击分支（header 展开/收起 vs 行跳转 vs 拖拽）、卡条目数、点击瞬间 `NSWorkspace.frontmostApplication`、承载窗口是否在屏。用于把「时灵时不灵」自动收敛到 H1/H2/H3，而无需稳定复现。
+- 同会话跳转的可见反馈（如卡上提示/短暂高亮），消除 H2 的“隐形”困惑。
+- 聚合卡 header 点击的语义再评估（是否也应提供跳转入口）。
