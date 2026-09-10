@@ -95,16 +95,22 @@ final class NotificationCard: NSObject {
     static let rowHeight: CGFloat = 30
     static let collapsedHeight = headerHeight
 
-    init(sessionId: String?, sessionTitle: String, action: String, path: String?, url: String?, autoDismissSec: Double? = nil) {
+    init(
+        sessionId: String?, sessionTitle: String, action: String, path: String?, url: String?,
+        autoDismissSec: Double? = nil, deadline: Date? = nil
+    ) {
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
         self.action = action
         self.path = path
         self.url = url
         self.autoDismissSec = autoDismissSec
-        self.autoDismissDeadline = (autoDismissSec ?? 0) > 0
+        // Restored cards keep their original absolute deadline (recomputing it
+        // as now+remaining would drift a little on every restart and the drift
+        // would be written back to disk).
+        self.autoDismissDeadline = deadline ?? ((autoDismissSec ?? 0) > 0
             ? Date().addingTimeInterval(autoDismissSec ?? 0)
-            : nil
+            : nil)
         let rect = NSRect(x: 0, y: 0, width: NotificationCard.width, height: NotificationCard.collapsedHeight)
         self.view = CardView(frame: rect)
         self.window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -915,6 +921,8 @@ final class CardStack {
         }
         guard !snapshot.cards.isEmpty else { return }
         restoring = true
+        // `defer` so a failure can never leave persistence disabled forever.
+        defer { restoring = false }
         for sc in snapshot.cards {
             // Expired auto-dismiss cards stay gone; the rest resume with the
             // remaining time instead of a fresh full countdown.
@@ -929,7 +937,8 @@ final class CardStack {
                 action: sc.action,
                 path: sc.path,
                 url: sc.url,
-                autoDismissSec: sc.remainingAutoDismiss(at: now)
+                autoDismissSec: sc.remainingAutoDismiss(at: now),
+                deadline: sc.deadline
             )
             for entry in sc.entries {
                 card.addCompletion(
@@ -946,9 +955,12 @@ final class CardStack {
                 self?.relayout(animated: true)
             }
             cards.append(card)
-            if sc.expanded { card.setExpanded(true) }
+            // Change the model directly: card.setExpanded() would fire the
+            // UI callback (relayout per card) while the stack is half-built.
+            if sc.expanded { card.model.setExpanded(true) }
         }
-        restoring = false
+        // Give expanded cards their real height before the single relayout.
+        for card in cards { card.updateFrame() }
         relayout(animated: false)
         dshLog("[cards] restored \(cards.count) card(s) from \(store.url.path)\n")
     }
@@ -1162,7 +1174,15 @@ final class SocketServer {
             // Diagnostic: current card/entry counts (used by the smoke test to
             // prove cards survive a daemon restart). Runs on the main thread
             // because the stack owns AppKit windows.
-            let summary = DispatchQueue.main.sync { onState?() ?? "{\"ok\":false}" }
+            var summary = "{\"ok\":false}"
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async { [weak self] in
+                summary = self?.onState?() ?? "{\"ok\":false}"
+                done.signal()
+            }
+            if done.wait(timeout: .now() + 2) == .timedOut {
+                summary = "{\"ok\":false,\"error\":\"state timeout\"}"
+            }
             reply(summary + "\n")
         case "probe":
             // Health check: the daemon is up. (Browser automation probing was
