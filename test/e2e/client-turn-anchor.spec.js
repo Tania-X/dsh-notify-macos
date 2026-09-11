@@ -77,3 +77,15 @@ test("plain session jump (no turn) still pins the bottom", async ({ page }) => {
     }, { timeout: 10000 })
     .toBe(true);
 });
+
+test("anchor re-aligns when history pages in above it", async ({ page }) => {
+  await gotoJump(page, `dsh-notify-macos/session=${SID}&turn=3`);
+  const inBand = async () => {
+    const m = await rowTop(page, "9:turn-tail3");
+    return m !== null && m.topInViewport > m.clientHeight * 0.4 && m.topInViewport < m.clientHeight * 0.8;
+  };
+  await expect.poll(inBand, { timeout: 8000 }).toBe(true);
+  // Older messages arrive above the anchor (real GUI pages history in).
+  await page.evaluate(() => window.__test.prependRows(3, 300));
+  await expect.poll(inBand, { timeout: 8000 }).toBe(true);
+});

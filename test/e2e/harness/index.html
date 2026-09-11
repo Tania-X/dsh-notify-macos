@@ -86,6 +86,20 @@
         }
       };
 
+      // Simulate history paging: insert rows ABOVE everything (they push the
+      // anchored row down, like loaded older messages do).
+      function prependRows(count, height) {
+        var c = document.getElementById("content");
+        for (var i = count; i >= 1; i--) {
+          var d = document.createElement("div");
+          d.setAttribute("data-chat-anchor-key", "0:older" + i);
+          d.setAttribute("data-chat-flow-kind", "older");
+          d.style.height = height + "px";
+          d.textContent = "older " + i;
+          c.insertBefore(d, c.firstChild);
+        }
+      }
+
       window.__test = {
         api: api,
         setSessionsBooted: function (b) { booted = b; },
@@ -93,7 +107,8 @@
         sessionsGets: function () { return window.__sessionsGets || 0; },
         scroller: function () { return document.getElementById("scroller"); },
         contentHeight: function () { return document.getElementById("content").scrollHeight; },
-        cleanup: function () { if (typeof cleanup === "function") cleanup(); }
+        cleanup: function () { if (typeof cleanup === "function") cleanup(); },
+        prependRows: prependRows
       };
 
       buildRows();      // static anchored content, like a loaded conversation
