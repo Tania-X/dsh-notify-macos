@@ -131,7 +131,13 @@ describe("daemon respawn policy (regression: killed daemon never respawned)", ()
   });
 
   it("spawns when the handle is dead (crash or killed out of band)", () => {
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1005 })).toBe(true);
+    // The exit handler clears the baseline, so a dead daemon is replaced at once.
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 0, now: 1005 })).toBe(true);
+  });
+
+  it("spaces attempts after a dead handle that was just (re)spawned", () => {
+    // Storm guard: if the replacement did not come up, wait out the window.
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1005 })).toBe(false);
   });
 
   it("never spawns a rival while the handle is alive (socket failure ≠ death)", () => {
