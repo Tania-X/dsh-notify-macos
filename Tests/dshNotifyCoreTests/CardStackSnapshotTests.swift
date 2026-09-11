@@ -129,3 +129,42 @@ private func card(autoDismissSec: Double?, deadline: Date?) -> SnapshotCard {
         XCTAssertNil(permanent.remainingAutoDismiss(at: t0))
     }
 }
+
+final class JumpLinkTests: XCTestCase {
+    func testURLWithoutTurnKeepsPlainSessionHash() {
+        XCTAssertEqual(
+            JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "session-1"),
+            "http://127.0.0.1:3080/#dsh-notify-macos/session=session-1"
+        )
+    }
+
+    func testURLWithTurnCarriesTheAnchor() {
+        XCTAssertEqual(
+            JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "session-1", turn: 42),
+            "http://127.0.0.1:3080/#dsh-notify-macos/session=session-1&turn=42"
+        )
+    }
+
+    func testNonPositiveTurnIsDropped() {
+        XCTAssertEqual(
+            JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "s", turn: 0),
+            "http://127.0.0.1:3080/#dsh-notify-macos/session=s"
+        )
+    }
+}
+
+final class SnapshotTurnTests: XCTestCase {
+    func testTurnSurvivesSnapshotRoundTrip() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsh-notify-turn-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = CardStackStore(url: url)
+        let card = SnapshotCard(
+            sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+            autoDismissSec: nil, turn: 91, expanded: false,
+            entries: [SnapshotEntry(message: "m", time: Date(timeIntervalSince1970: 1), kind: "completed", detail: nil, index: 1)]
+        )
+        store.save(CardStackSnapshot(cards: [card]))
+        XCTAssertEqual(store.load().cards.first?.turn, 91)
+    }
+}

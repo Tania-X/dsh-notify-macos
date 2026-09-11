@@ -130,3 +130,18 @@ public enum JumpPolicy {
         !sawDenied
     }
 }
+
+/// Deep-link construction for a card click (pure so it can be unit-tested).
+public enum JumpLink {
+    /// Hash namespace owned by the client half.
+    public static let hashPrefix = "dsh-notify-macos/session="
+
+    /// Build the URL the browser tab is pointed at. `turn` (when known) tells
+    /// the client which turn's completion to scroll to; without it the client
+    /// falls back to pinning the newest message.
+    public static func url(base: String, sessionId: String, turn: Int? = nil) -> String {
+        var hash = "\(hashPrefix)\(sessionId)"
+        if let turn, turn > 0 { hash += "&turn=\(turn)" }
+        return "\(base)/#\(hash)"
+    }
+}

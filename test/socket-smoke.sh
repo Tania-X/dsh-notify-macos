@@ -77,9 +77,10 @@ R=$(py '[{"cmd":"show","kind":"completed","sessionId":"smoke-a","sessionTitle":"
          {"cmd":"show","kind":"blocked","sessionId":"smoke-c","sessionTitle":"C","message":"wait","detail":"tool-x","sound":false},
          {"cmd":"show","kind":"weird-kind","sessionId":"smoke-d","message":"x","sound":false},
          {"cmd":"show","sessionId":"smoke-e","sound":false},
+         {"cmd":"show","sessionId":"smoke-turn","sessionTitle":"T","message":"m","turn":5,"sound":false},
          {"cmd":"show","message":"no session","sound":false}]')
 if ! echo "$R" | grep -q CONN-ERR; then
-  ok "7 show frames accepted (merge/kinds/degenerate)"
+  ok "8 show frames accepted (merge/kinds/degenerate/turn)"
 else
   bad "a show frame failed: $R"
 fi
@@ -90,10 +91,17 @@ kill -0 "$DPID" 2>/dev/null && ok "daemon alive after frames" || bad "daemon die
 # --- diagnostic state: 6 cards / 7 entries as pushed above ---
 S1=$(py '[{"cmd":"state"}]')
 C1=$(jget "$S1" cards); E1=$(jget "$S1" entries)
-if [ "$C1" = "6" ] && [ "$E1" = "7" ]; then
-  ok "state reports 6 cards / 7 entries"
+if [ "$C1" = "7" ] && [ "$E1" = "8" ]; then
+  ok "state reports 7 cards / 8 entries"
 else
   bad "state mismatch: $S1"
+fi
+
+# --- the turn anchor must be persisted (position-indexed jump survives restart) ---
+if grep -q '"turn" : 5\|"turn": 5\|"turn" : 5' "$CARDS" 2>/dev/null || grep -q '"turn"' "$CARDS" 2>/dev/null; then
+  ok "turn anchor persisted in the snapshot"
+else
+  bad "turn anchor missing from snapshot"
 fi
 
 # --- persistence: cards must survive a daemon restart ---

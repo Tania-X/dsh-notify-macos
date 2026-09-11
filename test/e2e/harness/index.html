@@ -29,14 +29,32 @@
   <script>
     // Boot driver mirrors the web shell: factory(require) -> api -> apply(ctx).
     (function () {
-      function growContent() {
+      // Conversation rows as the real GUI renders them: every flow row carries
+      // data-chat-anchor-key, and a finished turn ends with "<n>:turn-tail<T>".
+      function appendRow(container, key, kind, height) {
+        var d = document.createElement("div");
+        d.setAttribute("data-chat-anchor-key", key);
+        d.setAttribute("data-chat-flow-key", key);
+        if (kind) d.setAttribute("data-chat-flow-kind", kind);
+        d.style.height = height + "px";
+        d.style.borderBottom = "1px solid #eee";
+        d.textContent = key;
+        container.appendChild(d);
+        return d;
+      }
+
+      function buildRows() {
         var c = document.getElementById("content");
-        for (var i = 0; i < 60; i++) {
-          var d = document.createElement("div");
-          d.textContent = "msg " + Math.random().toString(36).slice(2);
-          c.appendChild(d);
+        c.innerHTML = "";
+        for (var turn = 1; turn <= 6; turn++) {
+          appendRow(c, "14:assistant-step" + turn + ":1", "assistant-step", 180);
+          appendRow(c, "9:tool-callcall_" + turn, "tool-call", 120);
+          appendRow(c, "call:call_" + turn, null, 40);
+          appendRow(c, "9:turn-tail" + turn, "turn-tail", 60);
         }
       }
+
+      function growContent() { buildRows(); }
 
       var entry = window.__entry;
       if (!entry || entry.id !== "dsh-notify-macos") {
@@ -49,7 +67,7 @@
       var sessions = {
         open: function (id) {
           window.__openCalls.push(id);
-          growContent();
+          buildRows();   // re-render the conversation on (re)open
         }
       };
       var booted = true;
@@ -78,6 +96,7 @@
         cleanup: function () { if (typeof cleanup === "function") cleanup(); }
       };
 
+      buildRows();      // static anchored content, like a loaded conversation
       api.apply(ctx);   // registers hashchange + handles any on-load jump hash
     })();
   </script>
