@@ -610,9 +610,14 @@ enum BrowserJumper {
     }
 
     /// Run osascript with a script; returns its exit code, stdout, stderr.
+    ///
+    /// Bounded: an Apple Events call can block indefinitely (observed when a
+    /// sandboxed daemon sends an event the system neither allows nor refuses),
+    /// which would freeze the whole jump. A killed probe reports `dsh-timeout`,
+    /// which classify() treats as `denied`.
     @discardableResult
     private static func runOSAScript(
-        _ script: String, label: String = ""
+        _ script: String, label: String = "", timeout: TimeInterval = 5
     ) -> (code: Int32, stdout: String, stderr: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -623,7 +628,22 @@ enum BrowserJumper {
         process.standardError = stderr
         do {
             try process.run()
-            process.waitUntilExit()
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            var timedOut = false
+            if process.isRunning {
+                timedOut = true
+                process.terminate()
+                Thread.sleep(forTimeInterval: 0.2)
+                if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
+                process.waitUntilExit()
+            }
+            if timedOut {
+                dshLog("[osascript\(label.isEmpty ? "" : " " + label)] timed out after \(Int(timeout))s; killing probe\n")
+                return (124, "", "dsh-timeout")
+            }
             let code = process.terminationStatus
             let errText = String(
                 data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
