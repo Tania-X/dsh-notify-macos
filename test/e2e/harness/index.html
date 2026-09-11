@@ -55,6 +55,18 @@
         appendRow(c, "9:turn-tail" + turn, "turn-tail", 60);
       }
 
+      // Decoy: a control whose label mentions history but is NOT the paging
+      // button — the client must never click it.
+      function appendDecoy(c) {
+        var btn = document.createElement("button");
+        btn.className = "decoy-history";
+        btn.textContent = "历史记录";
+        btn.addEventListener("click", function () {
+          window.__decoyClicks = (window.__decoyClicks || 0) + 1;
+        });
+        c.appendChild(btn);
+      }
+
       // The real GUI pages history in through a button at the top of the list.
       function appendLoadOlder(c) {
         var wrap = document.createElement("div");
@@ -82,6 +94,7 @@
         if (LAZY) {
           pendingOlderTurns = [3, 2, 1];     // older pages, loaded on demand
           for (var turn = 4; turn <= 6; turn++) appendTurn(c, turn);
+          appendDecoy(c);
           appendLoadOlder(c);
         } else {
           for (var t = 1; t <= 6; t++) appendTurn(c, t);
