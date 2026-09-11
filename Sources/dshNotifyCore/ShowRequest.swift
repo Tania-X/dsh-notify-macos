@@ -18,6 +18,8 @@ public struct ShowRequest {
     public let sessionTitle: String?
     public let sound: Bool?
     public let autoDismissSec: Double?
+    /// Turn whose completion the click should scroll to (position-indexed jump).
+    public let turn: Int?
 
     public init(
         cmd: String,
@@ -31,7 +33,8 @@ public struct ShowRequest {
         sessionId: String?,
         sessionTitle: String?,
         sound: Bool?,
-        autoDismissSec: Double?
+        autoDismissSec: Double?,
+        turn: Int?
     ) {
         self.cmd = cmd
         self.title = title
@@ -45,5 +48,6 @@ public struct ShowRequest {
         self.sessionTitle = sessionTitle
         self.sound = sound
         self.autoDismissSec = autoDismissSec
+        self.turn = turn
     }
 }

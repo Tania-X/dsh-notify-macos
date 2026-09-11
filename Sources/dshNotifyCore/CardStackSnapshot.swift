@@ -30,6 +30,9 @@ public struct SnapshotCard: Codable, Equatable {
     public var path: String?
     public var url: String?
     public var autoDismissSec: Double?
+    /// Turn whose completion this card points at (position-indexed jump); nil
+    /// for cards created before the anchor existed or without turn info.
+    public var turn: Int?
     /// Absolute auto-dismiss deadline (set when the card was first shown), so
     /// a restart cannot reset the countdown or resurrect an expired card.
     public var deadline: Date?
@@ -38,7 +41,7 @@ public struct SnapshotCard: Codable, Equatable {
 
     public init(
         sessionId: String?, sessionTitle: String, action: String, path: String?,
-        url: String?, autoDismissSec: Double?, deadline: Date? = nil,
+        url: String?, autoDismissSec: Double?, turn: Int? = nil, deadline: Date? = nil,
         expanded: Bool, entries: [SnapshotEntry]
     ) {
         self.sessionId = sessionId
@@ -47,6 +50,7 @@ public struct SnapshotCard: Codable, Equatable {
         self.path = path
         self.url = url
         self.autoDismissSec = autoDismissSec
+        self.turn = turn
         self.deadline = deadline
         self.expanded = expanded
         self.entries = entries

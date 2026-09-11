@@ -146,7 +146,7 @@ Socket 协议（JSON Lines）：
 
 | 命令 | 载荷 | 说明 |
 | --- | --- | --- |
-| `show` | `{sessionId, sessionTitle, title, kind, message, detail?, action, url, sound, autoDismissSec}` | 弹卡片（kind: `completed`/`error`/`blocked`；同一 session 多次完成合并为一张聚合卡） |
+| `show` | `{sessionId, sessionTitle, title, kind, message, detail?, turn?, action, url, sound, autoDismissSec}` | 弹卡片（kind: `completed`/`error`/`blocked`；同一 session 多次完成合并为一张聚合卡；`turn` 为位置锚点） |
 | `ping` | — | 存活探测 → `{"ok":true}` |
 | `probe` | — | 守护进程健康探测 → `{"ok":true,"daemon":true}` |
 | `debug` | `{url, sessionId, sessionTitle, focusOnly?}` | 手动触发一次跳转/聚焦（诊断用，`focusOnly:true` 模拟 blocked 点击） |

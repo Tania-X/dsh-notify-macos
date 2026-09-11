@@ -9,7 +9,7 @@
  * Kept deliberately as pure-function tests (no ctx, no sockets, no daemon).
  */
 import { describe, expect, it } from "vitest";
-import { classifyTurnEndReason, isRootSession } from "../lib/index.js";
+import { classifyTurnEndReason, isRootSession, nextTurnState, turnAnchorFor } from "../lib/index.js";
 
 describe("isRootSession", () => {
   it("returns true for every session when rootOnly is false", () => {
@@ -91,5 +91,36 @@ describe("classifyTurnEndReason", () => {
       kind: "error",
       detail: "interrupted",
     });
+  });
+});
+
+describe("turn tracking (#3 position-indexed jump)", () => {
+  it("records the open turn on turn/start and the ended turn on turn/end", () => {
+    let state = nextTurnState(undefined, { type: "turn/start", data: { turn: 7 } });
+    expect(state).toEqual({ open: 7 });
+
+    state = nextTurnState(state, { type: "turn/end", data: { turn: 7, reason: { kind: "completed" } } });
+    expect(state).toEqual({ lastEnded: 7 });
+  });
+
+  it("keeps a newer open turn while an older one ends", () => {
+    let state = nextTurnState(undefined, { type: "turn/start", data: { turn: 9 } });
+    state = nextTurnState(state, { type: "turn/start", data: { turn: 10 } });
+    state = nextTurnState(state, { type: "turn/end", data: { turn: 9 } });
+    expect(state).toEqual({ open: 10, lastEnded: 9 });
+  });
+
+  it("ignores events without a numeric turn", () => {
+    expect(nextTurnState({ lastEnded: 3 }, { type: "tool/call", data: { callId: "c1" } })).toEqual({ lastEnded: 3 });
+    expect(nextTurnState(undefined, { type: "turn/start", data: { turn: "x" } })).toEqual({});
+  });
+
+  it("anchors blocked cards on the open turn, others on the ended turn", () => {
+    const state = { open: 10, lastEnded: 9 };
+    expect(turnAnchorFor(state, "blocked")).toBe(10);
+    expect(turnAnchorFor(state, "completed")).toBe(9);
+    expect(turnAnchorFor(state, "error")).toBe(9);
+    expect(turnAnchorFor({ open: 4 }, "completed")).toBe(4);   // no ended turn yet
+    expect(turnAnchorFor(undefined, "completed")).toBeUndefined();
   });
 });

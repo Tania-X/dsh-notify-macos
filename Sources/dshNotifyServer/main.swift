@@ -79,6 +79,10 @@ final class NotificationCard: NSObject {
     let window: NSWindow
     let view: CardView
     let autoDismissSec: Double?
+    /// Turn whose completion this card points at (position-indexed jump).
+    /// Mutable: when another completion of the same session merges in, the card
+    /// follows the newest one.
+    var turn: Int?
     /// Absolute auto-dismiss deadline, persisted so a restart cannot reset it.
     let autoDismissDeadline: Date?
 
@@ -97,7 +101,7 @@ final class NotificationCard: NSObject {
 
     init(
         sessionId: String?, sessionTitle: String, action: String, path: String?, url: String?,
-        autoDismissSec: Double? = nil, deadline: Date? = nil
+        autoDismissSec: Double? = nil, turn: Int? = nil, deadline: Date? = nil
     ) {
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
@@ -105,6 +109,7 @@ final class NotificationCard: NSObject {
         self.path = path
         self.url = url
         self.autoDismissSec = autoDismissSec
+        self.turn = turn
         // Restored cards keep their original absolute deadline (recomputing it
         // as now+remaining would drift a little on every restart and the drift
         // would be written back to disk).
@@ -229,7 +234,7 @@ final class NotificationCard: NSObject {
             // targets the session's newest message.)
             BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
-                focusOnly: focusOnly
+                turn: turn, focusOnly: focusOnly
             )
         default:
             break
@@ -828,26 +833,24 @@ enum BrowserJumper {
         return outcome
     }
 
-    /// The deep-link hash the client half listens for.
-    static func jumpURL(url: String?, sessionId: String) -> String {
-        let base = (url?.isEmpty == false) ? url! : guiBaseUrl
-        return "\(base)/#dsh-notify-macos/session=\(sessionId)"
-    }
-
     /// Jump: point the hosting browser tab at the hashed GUI URL so the
     /// client half switches sessions in place; fall back to `open` when no
     /// browser hosts the GUI yet. When `focusOnly` is true (a card waiting on
     /// the user, e.g. approval/answer) it activates the hosting tab without
     /// navigating — the pending UI is already there.
-    static func jump(url: String?, sessionId: String?, sessionTitle: String?, focusOnly: Bool = false) {
+    static func jump(
+        url: String?, sessionId: String?, sessionTitle: String?, turn: Int? = nil,
+        focusOnly: Bool = false
+    ) {
         dshLog("[jump] start focusOnly=\(focusOnly) url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
         let guiUrl = (url?.isEmpty == false) ? url! : guiBaseUrl
         guard let sessionId, !sessionId.isEmpty else {
             if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
             return
         }
-        let target = jumpURL(url: url, sessionId: sessionId)
-        dshLog("[jump] target=\(target)\n")
+        let base = (url?.isEmpty == false) ? url! : guiBaseUrl
+        let target = JumpLink.url(base: base, sessionId: sessionId, turn: turn)
+        dshLog("[jump] target=\(target) (turn=\(turn.map(String.init) ?? "nil"))\n")
 
         // Running browsers only, each resolved to the app name AppleScript
         // can actually resolve for its channel (e.g. "Microsoft Edge Dev"),
@@ -992,6 +995,7 @@ final class CardStack {
                 path: sc.path,
                 url: sc.url,
                 autoDismissSec: sc.remainingAutoDismiss(at: now),
+                turn: sc.turn,
                 deadline: sc.deadline
             )
             for entry in sc.entries {
@@ -1041,6 +1045,7 @@ final class CardStack {
                 path: card.path,
                 url: card.url,
                 autoDismissSec: card.autoDismissSec,
+                turn: card.turn,
                 deadline: card.autoDismissDeadline,
                 expanded: card.expanded,
                 entries: card.entries.map(\.snapshot)
@@ -1075,6 +1080,7 @@ final class CardStack {
         if let sessionId = request.sessionId, !sessionId.isEmpty,
            let existing = cards.first(where: { $0.sessionId == sessionId }) {
             existing.addCompletion(message: message, kind: kind, detail: detail)
+            if let turn = request.turn { existing.turn = turn }   // newest completion wins
             relayout(animated: false)
             if request.sound == true { NSSound(named: NSSound.Name("Glass"))?.play() }
             return
@@ -1087,7 +1093,8 @@ final class CardStack {
             action: action,
             path: request.path,
             url: request.url,
-            autoDismissSec: request.autoDismissSec
+            autoDismissSec: request.autoDismissSec,
+            turn: request.turn
         )
         card.addCompletion(message: message, kind: kind, detail: detail)
         card.onRemoved = { [weak self] removed in
@@ -1232,7 +1239,8 @@ final class SocketServer {
                 sessionId: object["sessionId"] as? String,
                 sessionTitle: object["sessionTitle"] as? String,
                 sound: object["sound"] as? Bool,
-                autoDismissSec: object["autoDismissSec"] as? Double
+                autoDismissSec: object["autoDismissSec"] as? Double,
+                turn: object["turn"] as? Int
             )
             DispatchQueue.main.async { [weak self] in
                 self?.onShow?(request)
@@ -1265,9 +1273,10 @@ final class SocketServer {
             let sessionId = object["sessionId"] as? String
             let sessionTitle = object["sessionTitle"] as? String
             let focusOnly = (object["focusOnly"] as? Bool) ?? false
+            let turn = object["turn"] as? Int
             BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
-                focusOnly: focusOnly
+                turn: turn, focusOnly: focusOnly
             )
             reply("{\"ok\":true}\n")
         default:

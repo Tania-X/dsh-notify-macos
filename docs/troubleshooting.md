@@ -174,3 +174,21 @@ daemon 从单文件（`bin/dsh-notify-server.swift` + `swiftc`）改为 SwiftPM 
 - `BrowserCatalog` 改为 **family → channels**（每个渠道带自己的 AppleScript 名 + bundleId；Edge stable/Beta/Dev/Canary、Chrome stable/Beta/Canary、Brave 同理）。运行时先用 bundleId 判断**哪个渠道在跑**，再用该渠道的真实 app 名发 AppleScript；`activateApp` 也按渠道解析 bundleId。
 - **兜底策略收紧**：只有当“浏览器可达但没有承载 GUI 的标签页”（GUI 确实没开）时才 `open` 深链；若本轮出现 **denied（权限被拒）**，不再 `open`（那会新开标签并重载 GUI），改为记录明确日志 + 用 `NSRunningApplication` 激活浏览器（无需 Apple Events）。
 - 测试：`RunningChannelResolvesInstalledChannel`（只装 Dev → `"Microsoft Edge Dev"`；stable+Dev → 选 stable）、`ProbeOrderOnlyIncludesRunningBrowsers`、`FallbackOnlyWhenNoDenial`。
+
+## 18. 位置索引跳转（#3）：按 turn 定位，而不是会话底部
+
+**问题**：早期实现点击卡片只会把会话滚到**最新消息**（`pinToNewest`）。当任务完成之后用户又聊了几轮，卡片指向的“完成位置”就在上方，却被无视。
+
+**锚点选型（实测取证）**：
+- host 侧 `session/event` 事件里天然带 `data.turn`（`turn/start`、`turn/end`、`tool/call` 等）；`turn/end` 的 `data.reason.kind` 还区分了正常/异常结束。
+- GUI 侧（`@deepseek-ai/dsh-client-ui-conversation`）给每个聊天行打 `data-chat-anchor-key`，**一个 turn 的最后一行是 `<n>:turn-tail<TURN>`**（实测当前会话可见 `9:turn-tail91/92/93`，而进行中的 turn 94 尚无 tail 行）。key 前缀（`9:`/`13:`/`14:`）不是 turn 号，不可自行拼装 —— 因此采用 **后缀匹配 `:turn-tail<N>`**，兜底匹配 `assistant-step<N>:`。
+- GUI 没有对外暴露“滚到某锚点”的 API（锚点机制是内部用于恢复滚动位置的），所以由 client half 自己按 key 找到行再设置 `scrollTop`。
+
+**实现**：
+1. host（`lib/index.js`）：`nextTurnState`/`turnAnchorFor` 纯函数跟踪每个 session 的 `open`/`lastEnded` turn；`blocked` 用**当前打开的 turn**，其余用**刚结束的 turn**，随 show 载荷下发 `turn`；
+2. daemon：`ShowRequest.turn` → 深链 `#dsh-notify-macos/session=<id>&turn=N`（`JumpLink`，Core 纯函数可测）；`turn` 随卡片快照持久化，重启后点击仍能定位；
+3. client（`lib/client.js`）：解析 `&turn=`，打开会话后轮询找到 `:turn-tail<N>`（或 `assistant-step<N>:`）行，把它滚到视口约 **60%** 处（上方保留该 turn 的产出）；**找不到则回退**旧的“钉到最新”。
+
+**测试**：Playwright harness 渲染带锚点的行，断言“滚到 turn 行且在 40–80% 视口带内、未到底部”、“turn 不存在时回退到底部”、“无 turn 时行为不变”；vitest 覆盖 turn 状态机；XCTest 覆盖 `JumpLink`（含 `turn<=0` 丢弃）与快照 `turn` 往返；`socket-smoke.sh` 断言 `turn` 落盘。
+
+**边界**：turn 号来自事件流，若卡片创建时没有 turn（旧版本 host 或事件缺失）则行为退回“钉底部”——**永远有兜底，不会比之前更差**。
