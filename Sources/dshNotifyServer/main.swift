@@ -852,11 +852,16 @@ enum BrowserJumper {
         // Running browsers only, each resolved to the app name AppleScript
         // can actually resolve for its channel (e.g. "Microsoft Edge Dev"),
         // with the browser that worked last time first.
-        let order = BrowserCatalog.probeOrder(
-            runningBundleIds: runningBundleIds(), preferring: lastHostingBrowser
-        )
+        let running = runningBundleIds()
+        let lastSuccessful = lastHostingBrowser
+        let order = BrowserCatalog.probeOrder(runningBundleIds: running, preferring: lastSuccessful)
         if order.isEmpty {
-            dshLog("[jump] no catalogued browser is running\n")
+            dshLog("[jump] probe order: [] (no catalogued browser is running)\n")
+        } else {
+            dshLog(
+                "[jump] probe order: \(order.joined(separator: " > "))"
+                + " (running=\(running.count) bundles, lastSuccessful=\(lastSuccessful ?? "nil"))\n"
+            )
         }
 
         // A -10004 (Apple events denied while e.g. a system dialog owns the
