@@ -134,12 +134,16 @@ describe("daemon respawn policy (regression: killed daemon never respawned)", ()
     expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1005 })).toBe(true);
   });
 
-  it("throttles respawn attempts for a live handle", () => {
+  it("never spawns a rival while the handle is alive (socket failure ≠ death)", () => {
+    // A live daemon may simply not be listening yet (or its socket file was
+    // removed); spawning another would race it over the same socket path.
     expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1500 })).toBe(false);
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 3001 })).toBe(true);
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 3001 })).toBe(false);
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1100, retryAfterMs: 50 })).toBe(false);
   });
 
-  it("honours a custom retry window", () => {
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1100, retryAfterMs: 50 })).toBe(true);
+  it("throttles retries after a dead handle", () => {
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1500 })).toBe(false);
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 3001 })).toBe(true);
   });
 });
