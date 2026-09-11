@@ -89,3 +89,21 @@ test("anchor re-aligns when history pages in above it", async ({ page }) => {
   await page.evaluate(() => window.__test.prependRows(3, 300));
   await expect.poll(inBand, { timeout: 8000 }).toBe(true);
 });
+
+test("seeks older history when the anchored turn is not rendered yet", async ({ page }) => {
+  // Lazy harness: only turns 4-6 exist until the scrollport reaches the top.
+  await page.goto(`${HARNESS}?lazy=1#dsh-notify-macos/session=${SID}&turn=1`);
+  await page.waitForFunction(() => window.__test !== undefined);
+  await expect
+    .poll(() => page.evaluate(() => window.__olderPagesLoaded ?? 0), { timeout: 10000 })
+    .toBeGreaterThan(0);   // the client walked upwards and triggered a page load
+  await expect
+    .poll(async () => {
+      const m = await rowTop(page, "9:turn-tail1");
+      if (m === null) return "missing";
+      return m.topInViewport > m.clientHeight * 0.4 && m.topInViewport < m.clientHeight * 0.8
+        ? "in-band"
+        : m.topInViewport;
+    }, { timeout: 12000 })
+    .toBe("in-band");
+});
