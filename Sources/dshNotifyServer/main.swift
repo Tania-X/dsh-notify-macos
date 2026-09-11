@@ -610,9 +610,14 @@ enum BrowserJumper {
     }
 
     /// Run osascript with a script; returns its exit code, stdout, stderr.
+    ///
+    /// Bounded: an Apple Events call can block indefinitely (observed when a
+    /// sandboxed daemon sends an event the system neither allows nor refuses),
+    /// which would freeze the whole jump. A killed probe reports `dsh-timeout`,
+    /// which classify() treats as `denied`.
     @discardableResult
     private static func runOSAScript(
-        _ script: String, label: String = ""
+        _ script: String, label: String = "", timeout: TimeInterval = 5
     ) -> (code: Int32, stdout: String, stderr: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -623,7 +628,22 @@ enum BrowserJumper {
         process.standardError = stderr
         do {
             try process.run()
-            process.waitUntilExit()
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            var timedOut = false
+            if process.isRunning {
+                timedOut = true
+                process.terminate()
+                Thread.sleep(forTimeInterval: 0.2)
+                if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
+                process.waitUntilExit()
+            }
+            if timedOut {
+                dshLog("[osascript\(label.isEmpty ? "" : " " + label)] timed out after \(Int(timeout))s; killing probe\n")
+                return (124, "", "dsh-timeout")
+            }
             let code = process.terminationStatus
             let errText = String(
                 data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
@@ -648,6 +668,7 @@ enum BrowserJumper {
         case hosted  // tab found and the action (navigate / focus) ran
         case noHost  // browser ran but no tab shows the GUI — try next browser
         case denied  // Apple events denied (e.g. transient -10004) — retry
+        case timedOut // the probe had to be killed — retrying rarely helps
     }
 
     /// Classify an osascript result: exit 0 = hosted; our own "dsh-no-tab"
@@ -657,6 +678,7 @@ enum BrowserJumper {
     ) -> ProbeOutcome {
         if result.code == 0 { return .hosted }
         if result.stderr.contains("dsh-no-tab") { return .noHost }
+        if result.stderr.contains("dsh-timeout") { return .timedOut }
         return .denied
     }
 
@@ -845,6 +867,7 @@ enum BrowserJumper {
         var sawNoHostAnyPass = false
         for pass in 1...JumpPolicy.maxProbePasses {
             var sawDenied = false
+            var sawTimeout = false
             for app in order {
                 dshLog("[jump] pass \(pass) probing \(app)\n")
                 let outcome: ProbeOutcome = focusOnly
@@ -858,10 +881,20 @@ enum BrowserJumper {
                 case .denied:
                     sawDenied = true   // transient? try the whole pass again
                     sawDeniedAnyPass = true
+                case .timedOut:
+                    // A hung probe means we could not talk to the browser at all
+                    // (permission prompt, sandbox). Treat it as undrivable — so
+                    // no `open` (that would spawn a new tab) — and don't burn the
+                    // remaining passes retrying it.
+                    dshLog("[jump] \(app) probe timed out; treating as undrivable\n")
+                    sawDenied = true
+                    sawDeniedAnyPass = true
+                    sawTimeout = true
                 case .noHost:
                     sawNoHostAnyPass = true   // try the next running browser
                 }
             }
+            if sawTimeout { break }        // a hung browser won't answer next pass
             if !sawDenied { break }
             if JumpPolicy.shouldRetry(afterPass: pass, sawDenied: sawDenied) {
                 Thread.sleep(forTimeInterval: JumpPolicy.retryDelaySeconds)
