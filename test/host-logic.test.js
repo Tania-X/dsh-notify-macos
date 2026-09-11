@@ -131,13 +131,25 @@ describe("daemon respawn policy (regression: killed daemon never respawned)", ()
   });
 
   it("spawns when the handle is dead (crash or killed out of band)", () => {
-    // The exit handler clears the baseline, so a dead daemon is replaced at once.
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 0, now: 1005 })).toBe(true);
+    // A daemon that had been healthy is replaced immediately.
+    expect(shouldStartDaemon({
+      hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1005, lastSpawnFailed: false
+    })).toBe(true);
   });
 
-  it("spaces attempts after a dead handle that was just (re)spawned", () => {
-    // Storm guard: if the replacement did not come up, wait out the window.
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1005 })).toBe(false);
+  it("throttles a crash loop (replacement also died immediately)", () => {
+    expect(shouldStartDaemon({
+      hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1500, lastSpawnFailed: true
+    })).toBe(false);
+    expect(shouldStartDaemon({
+      hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 3001, lastSpawnFailed: true
+    })).toBe(true);
+  });
+
+  it("spawns immediately when the failed marker has no timestamp to throttle on", () => {
+    expect(shouldStartDaemon({
+      hasHandle: false, handleDead: false, lastSpawnedAt: 0, now: 10, lastSpawnFailed: true
+    })).toBe(true);
   });
 
   it("never spawns a rival while the handle is alive (socket failure ≠ death)", () => {
@@ -146,10 +158,5 @@ describe("daemon respawn policy (regression: killed daemon never respawned)", ()
     expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1500 })).toBe(false);
     expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 3001 })).toBe(false);
     expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1100, retryAfterMs: 50 })).toBe(false);
-  });
-
-  it("throttles retries after a dead handle", () => {
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1500 })).toBe(false);
-    expect(shouldStartDaemon({ hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 3001 })).toBe(true);
   });
 });
