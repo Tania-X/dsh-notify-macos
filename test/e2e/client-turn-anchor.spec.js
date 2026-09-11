@@ -97,7 +97,6 @@ test("seeks older history when the anchored turn is not rendered yet", async ({ 
   await expect
     .poll(() => page.evaluate(() => window.__olderPagesLoaded ?? 0), { timeout: 10000 })
     .toBeGreaterThan(0);   // the client walked upwards and triggered a page load
-  expect(await page.evaluate(() => window.__decoyClicks ?? 0)).toBe(0);   // never mis-click
   await expect
     .poll(async () => {
       const m = await rowTop(page, "9:turn-tail1");
@@ -107,12 +106,18 @@ test("seeks older history when the anchored turn is not rendered yet", async ({ 
         : m.topInViewport;
     }, { timeout: 12000 })
     .toBe("in-band");
+  // Only now is the seek finished — assert the decoy survived the WHOLE seek.
+  await page.waitForTimeout(500);
+  expect(await page.evaluate(() => window.__decoyClicks ?? 0)).toBe(0);
 });
 
 test("seek never clicks unrelated history-looking controls", async ({ page }) => {
   await page.goto(`${HARNESS}?lazy=1#dsh-notify-macos/session=${SID}&turn=1`);
   await page.waitForFunction(() => window.__test !== undefined);
-  await page.waitForTimeout(2000);
+  // Wait until every older page is in (the seek has therefore run its course).
+  await expect
+    .poll(() => page.evaluate(() => window.__olderPagesLoaded ?? 0), { timeout: 12000 })
+    .toBeGreaterThanOrEqual(3);
+  await page.waitForTimeout(500);
   expect(await page.evaluate(() => window.__decoyClicks ?? 0)).toBe(0);
-  expect(await page.evaluate(() => window.__olderPagesLoaded ?? 0)).toBeGreaterThan(0);
 });
