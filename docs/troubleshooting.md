@@ -153,3 +153,24 @@ daemon 从单文件（`bin/dsh-notify-server.swift` + `swiftc`）改为 SwiftPM 
 - **点击分支诊断日志**（低成本、无行为变化）：在 `CardView.mouseUp` 记录 —— 点击分支（header 展开/收起 vs 行跳转 vs 拖拽）、卡条目数、点击瞬间 `NSWorkspace.frontmostApplication`、承载窗口是否在屏。用于把「时灵时不灵」自动收敛到 H1/H2/H3，而无需稳定复现。
 - 同会话跳转的可见反馈（如卡上提示/短暂高亮），消除 H2 的“隐形”困惑。
 - 聚合卡 header 点击的语义再评估（是否也应提供跳转入口）。
+
+## 17. 浏览器渠道名 + 兜底 `open`：一次“新标签重载 GUI”的复盘（2026-09-10）
+
+症状：点卡片 → **在当前浏览器新建标签并重新加载 GUI**（看似回到最早的老问题）。
+
+日志定位：
+```
+[osascript navigate-Safari] exit=1 err=…“Safari”遇到一个错误：发生权限违例 (-10004)
+[osascript navigate-Microsoft Edge] exit=1 err=389:399 syntax error (-2740)
+[jump] no hosting tab found; falling back to open → open exit=0
+```
+
+两个原因叠加：
+
+1. **-10004 是启动环境问题（人为）**：daemon 由**沙箱内的 shell**（`nohup` 于受限 bash）启动时，Apple Events 被拦，Safari 探测全部被拒。带完整权限重启后立即恢复（`navigated tab in Safari`）。**教训：profile daemon 不要用沙箱 shell 启动** —— 让插件（dsh web 进程）拉起，或带完整权限启动。
+2. **Edge 的 -2740 是真缺陷**：本机只装了 **Microsoft Edge Dev**，而浏览器目录用的是 stable 名字 `"Microsoft Edge"` → AppleScript 找不到该应用 → 编译报 `-2740`（用 `"Microsoft Edge Dev"` 实测可编译）。以前 Safari 第一顺位成功，此路径从未暴露。
+
+修复（本 PR）：
+- `BrowserCatalog` 改为 **family → channels**（每个渠道带自己的 AppleScript 名 + bundleId；Edge stable/Beta/Dev/Canary、Chrome stable/Beta/Canary、Brave 同理）。运行时先用 bundleId 判断**哪个渠道在跑**，再用该渠道的真实 app 名发 AppleScript；`activateApp` 也按渠道解析 bundleId。
+- **兜底策略收紧**：只有当“浏览器可达但没有承载 GUI 的标签页”（GUI 确实没开）时才 `open` 深链；若本轮出现 **denied（权限被拒）**，不再 `open`（那会新开标签并重载 GUI），改为记录明确日志 + 用 `NSRunningApplication` 激活浏览器（无需 Apple Events）。
+- 测试：`RunningChannelResolvesInstalledChannel`（只装 Dev → `"Microsoft Edge Dev"`；stable+Dev → 选 stable）、`ProbeOrderOnlyIncludesRunningBrowsers`、`FallbackOnlyWhenNoDenial`。

@@ -596,15 +596,12 @@ enum BrowserJumper {
         }
     }
 
-    /// Browsers probed in order; the first one hosting the GUI tab wins.
-    /// The names are what AppleScript resolves (stable across system
-    /// languages); the bundle ids drive the running check (localizedName is
-    /// localized, e.g. Safari → "Safari浏览器" on a Chinese system).
-    /// Browsers probed in order + bundle ids: data lives in dshNotifyCore
-    /// (BrowserCatalog) so tests can assert it; thin computed aliases keep the
-    /// call sites unchanged.
-    private static var browserCandidates: [String] { BrowserCatalog.candidates }
-    private static var browserBundleIds: [String: [String]] { BrowserCatalog.bundleIds }
+    /// Bundle ids of every browser process currently running. The browser
+    /// catalog (families + channels) lives in dshNotifyCore so tests can
+    /// assert the channel resolution.
+    private static func runningBundleIds() -> Set<String> {
+        Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+    }
 
     /// Escape a value as an AppleScript double-quoted string literal.
     private static func asString(_ value: String) -> String {
@@ -646,17 +643,6 @@ enum BrowserJumper {
         }
     }
 
-    /// Whether the named browser is currently running (cheap lookup, no Apple
-    /// events, so a transient Automation denial never hides a running browser).
-    private static func isRunning(_ appName: String) -> Bool {
-        guard let ids = browserBundleIds[appName] else { return false }
-        let running = NSWorkspace.shared.runningApplications
-        return running.contains { app in
-            guard let bid = app.bundleIdentifier else { return false }
-            return ids.contains(bid)
-        }
-    }
-
     /// Outcome of one hosting-tab probe.
     private enum ProbeOutcome {
         case hosted  // tab found and the action (navigate / focus) ran
@@ -683,9 +669,9 @@ enum BrowserJumper {
     /// without `.activateAllWindows` only activates + switches to the Space
     /// of the app's active window, leaving other Spaces' stacking untouched.
     private static func activateApp(_ appName: String) -> Bool {
-        guard let primaryId = browserBundleIds[appName]?.first,
+        guard let channel = BrowserCatalog.channel(appName: appName),
               let app = NSWorkspace.shared.runningApplications.first(where: {
-                  $0.bundleIdentifier == primaryId
+                  $0.bundleIdentifier == channel.bundleId
               })
         else { return false }
         // No options: modern (macOS 14+) activation — activates the app and
@@ -841,16 +827,25 @@ enum BrowserJumper {
         let target = jumpURL(url: url, sessionId: sessionId)
         dshLog("[jump] target=\(target)\n")
 
-        // Try the browser that worked last time first, then the others.
-        var order = JumpPolicy.probeOrder(candidates: BrowserCatalog.candidates, preferring: lastHostingBrowser)
+        // Running browsers only, each resolved to the app name AppleScript
+        // can actually resolve for its channel (e.g. "Microsoft Edge Dev"),
+        // with the browser that worked last time first.
+        let order = BrowserCatalog.probeOrder(
+            runningBundleIds: runningBundleIds(), preferring: lastHostingBrowser
+        )
+        if order.isEmpty {
+            dshLog("[jump] no catalogued browser is running\n")
+        }
 
         // A -10004 (Apple events denied while e.g. a system dialog owns the
         // focus) is transient: retry the whole probe up to 3 times, but only
         // while some running browser got DENIED. A clean pass where every
         // running browser reports no hosting tab needs no retry.
-        for pass in 1...3 {
+        var sawDeniedAnyPass = false
+        var sawNoHostAnyPass = false
+        for pass in 1...JumpPolicy.maxProbePasses {
             var sawDenied = false
-            for app in order where isRunning(app) {
+            for app in order {
                 dshLog("[jump] pass \(pass) probing \(app)\n")
                 let outcome: ProbeOutcome = focusOnly
                     ? focusHostingTab(appName: app, guiUrl: guiUrl)
@@ -862,8 +857,9 @@ enum BrowserJumper {
                     return
                 case .denied:
                     sawDenied = true   // transient? try the whole pass again
+                    sawDeniedAnyPass = true
                 case .noHost:
-                    break              // try the next running browser
+                    sawNoHostAnyPass = true   // try the next running browser
                 }
             }
             if !sawDenied { break }
@@ -872,8 +868,24 @@ enum BrowserJumper {
             }
         }
 
-        // Fallback: system open (GUI loads; client half handles the hash on boot).
-        dshLog("[jump] no hosting tab found; falling back to open\n")
+        guard JumpPolicy.shouldOpenFallback(sawDenied: sawDeniedAnyPass) else {
+            // A DENIED pass means the browser is running but we are not allowed
+            // to drive it (macOS Automation denied — e.g. the daemon was started
+            // from a sandboxed shell). `open` would spawn a NEW TAB and reload
+            // the GUI, so don't: surface the browser through NSRunningApplication
+            // (no Apple Events needed) and say why.
+            dshLog("[jump] automation denied for a running browser; NOT opening a new tab\n")
+            dshLog("[jump] hint: restart the daemon outside a sandbox (or let the plugin spawn it) and re-grant Automation\n")
+            if let first = order.first {
+                _ = activateApp(first)
+                dshLog("[jump] activated \(first) instead\n")
+            }
+            return
+        }
+
+        // Clean pass: browsers were reachable but no tab hosts the GUI, i.e. the
+        // GUI is not open anywhere → opening the deep link is the right recovery.
+        dshLog("[jump] no hosting tab found (noHost=\(sawNoHostAnyPass)); falling back to open\n")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = [focusOnly ? guiUrl : target]
