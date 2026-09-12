@@ -44,6 +44,8 @@ $EDITOR "$DSH_HOME/profiles/web/cordis.patch.yml"
         enabled: true
         clickAction: jump-web
         webUrl: http://127.0.0.1:3080
+        # 默认是 $TMPDIR/dsh-notify-macos.sock；钉到 /tmp 只是为了
+        # 排查时手敲命令方便（$TMPDIR 是 /var/folders/… 那种长路径）
         socketPath: /tmp/dsh-notify-macos.sock
         # 默认就是包内路径，一般不用写；写了要指到真正装好的位置：
         serverPath: /Users/<你>/.dsh/profiles/web/node_modules/dsh-notify-macos/bin/dsh-notify-server
@@ -63,7 +65,8 @@ curl -s -X POST http://127.0.0.1:3080/api/pluginInventory/list \
   -d '{"type":"client-request","rpcId":"v1","method":"pluginInventory/list","payload":{"args":{}}}'
 
 # 守护进程活着吗（注意：请求必须以换行结尾）
-printf '{"cmd":"ping"}\n' | nc -U /tmp/dsh-notify-macos.sock      # → {"ok":true}
+printf '{"cmd":"ping"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"   # → {"ok":true}
+# 若你在配置里钉了 socketPath，就换成那个路径（例如 /tmp/dsh-notify-macos.sock）
 ```
 
 > **Intel Mac / 二进制跑不起来？** 仓库里预编译的 `bin/dsh-notify-server` 是 **Apple Silicon（arm64）**。
@@ -107,7 +110,7 @@ printf '{"cmd":"ping"}\n' | nc -U /tmp/dsh-notify-macos.sock      # → {"ok":tr
 | `rootOnly` | `true` | 只通知顶层会话；`false` 时子代理完成也通知 |
 | `autoDismissSec` | `0` | 自动消失秒数（`0` = 常驻） |
 | `title` | `"DeepSeek Harness"` | 拿不到会话名时的兜底标题 |
-| `socketPath` | `/tmp/dsh-notify-macos.sock` | 与守护进程通信的 socket |
+| `socketPath` | `$TMPDIR/dsh-notify-macos.sock` | 与守护进程通信的 socket（示例配置里钉成 `/tmp/...` 只是为了好敲） |
 | `serverPath` | 包内 `bin/dsh-notify-server` | 守护进程路径 |
 
 ## 出问题先看这几条
@@ -126,8 +129,8 @@ printf '{"cmd":"ping"}\n' | nc -U /tmp/dsh-notify-macos.sock      # → {"ok":tr
 **要给作者反馈问题时，附上这三样最有用**：
 
 ```bash
-printf '{"cmd":"state"}\n' | nc -U /tmp/dsh-notify-macos.sock   # 当前卡片状态
-tail -50 /tmp/dsh-notify-macos.log                              # 守护进程日志
+printf '{"cmd":"state"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"  # 当前卡片状态
+tail -50 /tmp/dsh-notify-macos.log                                 # 守护进程日志（固定路径）
 sw_vers; uname -m; dsh --version                                # macOS / 架构 / DSH 版本
 ```
 

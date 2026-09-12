@@ -55,9 +55,6 @@
     "notification",
     "cordis"
   ],
-  "os": [
-    "darwin"
-  ],
   "engines": {
     "node": ">=22"
   }

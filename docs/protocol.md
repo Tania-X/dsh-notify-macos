@@ -4,7 +4,8 @@
 **必须以换行结尾** —— 守护进程是以换行判定"请求完整"的；漏掉换行会让它一直阻塞到对端关闭，
 你自己看到的是"超时"，而请求其实是在你关闭 socket 之后才被处理的。见 `docs/troubleshooting.md` §21）。
 
-默认 socket：`/tmp/dsh-notify-macos.sock`（可用配置 `socketPath` 改）。
+默认 socket：`$TMPDIR/dsh-notify-macos.sock`（`os.tmpdir()`，在 macOS 上是 `/var/folders/…/T/` 这种长路径），
+可用配置 `socketPath` 改。本文档示例为便于手敲统一写成 `/tmp/dsh-notify-macos.sock` —— 那需要你在配置里显式钉上该路径。
 
 ## 命令
 
@@ -21,22 +22,22 @@
 
 ```bash
 # 存活
-printf '{"cmd":"ping"}\n' | nc -U /tmp/dsh-notify-macos.sock
+printf '{"cmd":"ping"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
 # → {"ok":true}
 
 # 当前卡片
-printf '{"cmd":"state"}\n' | nc -U /tmp/dsh-notify-macos.sock
+printf '{"cmd":"state"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
 # → {"ok":true,"cards":2,"entries":3}
 
 # 手动跳一次（会真的驱动浏览器）
 printf '{"cmd":"debug","url":"http://127.0.0.1:3080","sessionId":"<会话 id>","turn":42}\n' \
-  | nc -U /tmp/dsh-notify-macos.sock
+  | nc -U "$TMPDIR/dsh-notify-macos.sock"
 ```
 
 推一张测试卡片（`test/manual/push-anchors.py` 是现成的夹具，支持"一张卡多行、每行一个位置锚点"）：
 
 ```bash
-python3 test/manual/push-anchors.py /tmp/dsh-notify-macos.sock <会话 id> 120:最新 60:需翻页 1:最早
+python3 test/manual/push-anchors.py "$TMPDIR/dsh-notify-macos.sock" <会话 id> 120:最新 60:需翻页 1:最早
 ```
 
 ## 日志里能读到什么
