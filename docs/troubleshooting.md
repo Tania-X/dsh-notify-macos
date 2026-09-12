@@ -256,3 +256,32 @@ nohup /Users/apple/.dsh/profiles/web/node_modules/dsh-notify-macos/bin/dsh-notif
 ```
 
 （GUI 重启后由插件自己拉起的 daemon 挂在 GUI server 下，不会随终端退出；前提是 host 半区是含自愈逻辑的新版本。）
+
+### 18.3 真实 GUI 的逐行锚点边界实测（client 侧，不依赖 daemon）
+
+`test/manual/real-gui-multi-anchor.mjs` 直接对**真实 `dsh web`** 逐条发深链
+（`#dsh-notify-macos/session=<id>&turn=N`），量测每一档锚点的落点 —— 不需要 daemon、不需要
+macOS 自动化授权，因此可以在“卡片点击”之外独立验证 client 半区：
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs 104 98 60 20 1 9999
+```
+
+本次实测（会话 `…404c20`，视口 644px）：
+
+| 锚点 | 结果 | 数据 |
+| --- | --- | --- |
+| 104（最新，窗口内） | ✅ 精确命中 | `turn-tail104` 在视口 386px ≈ 60%，未到底部 |
+| 98（窗口内偏旧） | ✅ 精确命中 | 行数 253→642（翻页），386px |
+| 60（窗口外，需翻页） | ✅ 精确命中 | 行数 →2019，`scrollHeight 39637→123272`，386px |
+| 20（更旧） | ✅ 命中 | `scrollTop=6005`，贴近已加载历史的顶部 |
+| 1（最早） | ⚠️ 回退 | 只翻到 `tailRange 15..107`，8s 时限内到不了最开头 → 回退“钉最新”（底部） |
+| 9999（不存在该 turn） | ✅ 设计内回退 | 稳定后 `atBottom=true`，最新行在视口内 |
+
+**边界语义（两档）**：
+1. **会话真的有的锚点** → 落到**它自己**的 `turn-tail<N>` 行、视口 40–80% 带内（这一步也是逐行锚点功能的验收点：每行带自己的 `turn`）；
+2. **取不到的锚点**（不存在的 turn，或超出翻页预算的极旧 turn）→ 回退 `pinToNewest`（最新行可见）——**永远不比加锚点之前更差**。
+
+**已知预算**：client 的 seek 有 8s 时限 + “连续 3 次没加载出新内容就停手”。本会话从最新翻到 turn 15 就要 `rows 253→3338`、`scrollHeight 720→218168`，因此极旧锚点（如 turn 1）会在时限内放弃并回退；这不是 bug，而是“点击后不能一直僵着”的取舍。要覆盖更深的锚点就调大 `scrollToTurn` 的 `timeoutMs`（代价是点了以后停留更久）。
+
+**探针取数要等稳定**：回退路径（`pinToNewest`）比直接命中晚落位，脚本对“无锚点”档等 12s 而不是 9s —— 否则会读到滚动中途的位置，把 9999 误判成失败（本次第一版就踩了）。
