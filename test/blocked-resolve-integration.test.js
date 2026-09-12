@@ -16,7 +16,7 @@ import { apply } from "../lib/index.js";
 const sockets = [];
 
 /** Start a fake daemon on a private unix socket; collect the frames it gets. */
-async function fakeDaemon() {
+async function fakeDaemon({ reply = null } = {}) {
   // Short path on purpose: a unix socket address is capped (~104 bytes) and
   // macOS' os.tmpdir() is long enough to blow past it (the connect then fails
   // silently and the test looks like the wiring is broken).
@@ -38,6 +38,8 @@ async function fakeDaemon() {
         }
         for (const wake of waiters.splice(0)) wake();
       }
+      // Reply like the real daemon does for `clear` (the plugin reads it).
+      if (reply) conn.write(`${JSON.stringify(reply)}\n`);
     });
     conn.on("error", () => {});
   });
@@ -73,14 +75,20 @@ async function fakeDaemon() {
 /** Minimal plugin ctx: capture the session/event handler apply() registers. */
 function fakeCtx() {
   const handlers = {};
+  const logs = { warn: [], info: [], debug: [] };
   return {
     handlers,
+    logs,
     ctx: {
       on(name, fn) {
         handlers[name] = fn;
       },
       sessionTitle: { get: () => ({ title: "Test Session" }) },
-      logger: { warn() {}, info() {}, debug() {} },
+      logger: {
+        warn: (...args) => logs.warn.push(args.join(" ")),
+        info: (...args) => logs.info.push(args.join(" ")),
+        debug: (...args) => logs.debug.push(args.join(" ")),
+      },
     },
   };
 }
@@ -196,6 +204,59 @@ describe.skipIf(process.platform !== "darwin")("blocked card cleanup over the re
     });
     const frames = await daemon.waitFor("clear");
     expect(frames.find((f) => f.cmd === "clear").ref).toBe("approval:ap-lost");
+  });
+
+  it("reads the daemon's reply and stays quiet when the row was removed", async () => {
+    const daemon = await fakeDaemon({ reply: { ok: true, removed: 1, remaining: 0 } });
+    const { ctx, handlers, logs } = fakeCtx();
+    apply(ctx, configFor(daemon.socketPath));
+
+    handlers["session/event"](session, {
+      type: "approval/decided",
+      data: { id: "ap-ok", outcome: "allowed-once" },
+    });
+    await daemon.waitFor("clear");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(daemon.of("clear")).toHaveLength(1);
+    expect(logs.warn).toHaveLength(0);
+    expect(logs.info).toHaveLength(0);
+  });
+
+  it("logs a no-op (not an error) when the daemon has no such card", async () => {
+    const daemon = await fakeDaemon({ reply: { ok: true, removed: 0, reason: "no-card" } });
+    const { ctx, handlers, logs } = fakeCtx();
+    apply(ctx, configFor(daemon.socketPath));
+
+    handlers["session/event"](session, {
+      type: "approval/decided",
+      data: { id: "ap-gone", outcome: "denied" },
+    });
+    await daemon.waitFor("clear");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(logs.info.join("\n")).toContain("no-card");
+    expect(logs.warn).toHaveLength(0);
+  });
+
+  it("retries once (after a spawn attempt) and warns instead of dropping the clear", async () => {
+    // Unreachable daemon (no listener, and the spawn target does not exist): the
+    // clear must not vanish silently — that is how a card would linger on screen
+    // after the user already handled the situation.
+    const missing = `/tmp/dsh-notify-missing-${process.pid}.sock`;
+    const { ctx, handlers, logs } = fakeCtx();
+    apply(ctx, { ...configFor(missing), serverPath: "/nonexistent/dsh-notify-server" });
+
+    handlers["session/event"](session, {
+      type: "approval/decided",
+      data: { id: "ap-down", outcome: "allowed-once" },
+    });
+    const deadline = Date.now() + 4000;
+    while (logs.warn.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(logs.warn.join("\n")).toContain("clear dropped");
+    expect(logs.warn.join("\n")).toContain("ap-down");
   });
 
   it("keeps a pending row when a DIFFERENT approval is decided", async () => {

@@ -392,6 +392,7 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
    - 普通 `tool/result` 只在登记过时发（**每次工具调用都会产生它**，不能无脑发）。
 3. **协议**：`{cmd:"clear", sessionId, ref}` → 回复 `{"ok":true,"removed":0|1,"remaining":N,"reason":"no-card"|"no-row"}`。daemon 按 `ref` 删行：**剩 0 行 → 卡片 dismiss**（动画后出栈）；**剩 1 行 → 自动折叠**（`CardModel.removeCompletion` 的既有语义）并重新排布 + 落盘。
 4. **绝不误删**：未知 `ref`/未知 session 一律 no-op（不按 kind 猜）；你在 GUI 处理前已经手动点掉该行的话，clear 就是 `removed:0, reason:"no-row"`。
+5. **clear 不能静默丢弃**（评审 [4]）：`deliver()` 在发送失败时会拉起 daemon 再重试一次，`clear` 一开始没有同等处理 —— 如果卡片是在 daemon 存活时建好的、之后 daemon 崩了或被重启（卡片从快照恢复），而你正好在这时处理完授权，`clear` 就会因为 daemon 未就绪被扔掉，**琥珀卡永久留在屏幕上**，恰是本功能要消除的场景。现在 `clearBlocked` 复用同一套「失败则拉起 + 重试一次」策略，并且**读取 daemon 的回复**：`removed:0` 记 info（no-op，不是错误）、彻底发不出去则 `logger.warn(... clear dropped (daemon unreachable) ...)`，绝不无声消失。`requestDaemon`（带回复的请求）与 `sendToDaemon`（只等写入的 fire-and-forget）是两个用途不同的助手。
 
 **与既有原则的关系**：这**不冲突**于「跳转失败不吞卡片」—— 那是"你点了卡片但没跳成"，这是"你已经把问题处理掉了"，两者的触发源完全不同。
 
