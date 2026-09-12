@@ -192,23 +192,53 @@ final class SnapshotTurnTests: XCTestCase {
 
     /// Snapshot files written before per-row anchors existed (no `turn` key on
     /// entries) must still load — otherwise an upgrade wipes live cards.
+    ///
+    /// The legacy file is derived from a real snapshot with the per-row `turn`
+    /// keys stripped, instead of being hand-written: the store decodes dates as
+    /// **ISO8601 strings** (`"time": "2023-11-14T22:13:20Z"`), so a hand-rolled
+    /// fixture drifts from the format and reports `.corrupt` for the wrong
+    /// reason.
     func testLegacySnapshotWithoutPerRowTurnLoads() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("dsh-notify-legacy-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
-        let legacy = """
-        {"version":\(CardStackSnapshot.currentVersion),"cards":[{"sessionId":"s","sessionTitle":"T",\
-        "action":"jump-web","url":null,"path":null,"expanded":false,"turn":93,\
-        "entries":[{"message":"a","time":1,"kind":"completed","detail":null,"index":1}]}]}
-        """
-        try legacy.write(to: url, atomically: true, encoding: .utf8)
-        let (snapshot, diagnostic) = CardStackStore(url: url).loadWithDiagnostic()
+        let store = CardStackStore(url: url)
+        store.save(CardStackSnapshot(cards: [
+            SnapshotCard(
+                sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+                autoDismissSec: nil, turn: 93, expanded: false,
+                entries: [
+                    SnapshotEntry(
+                        message: "a", time: t0, kind: "completed", detail: nil,
+                        index: 1, turn: 93
+                    )
+                ]
+            )
+        ]))
+
+        // Rewrite the file the way a pre-per-row-anchor daemon would have: the
+        // card keeps its anchor, the entries have no `turn` at all.
+        let data = try Data(contentsOf: url)
+        var root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var cards = try XCTUnwrap(root["cards"] as? [[String: Any]])
+        var card = cards[0]
+        var entries = try XCTUnwrap(card["entries"] as? [[String: Any]])
+        XCTAssertNotNil(entries[0].removeValue(forKey: "turn"), "fixture must actually drop the key")
+        card["entries"] = entries
+        cards[0] = card
+        root["cards"] = cards
+        try JSONSerialization.data(withJSONObject: root).write(to: url)
+
+        let (snapshot, diagnostic) = store.loadWithDiagnostic()
         guard case .loaded(let count) = diagnostic else {
             return XCTFail("legacy snapshot should load, got \(diagnostic)")
         }
         XCTAssertEqual(count, 1)
         XCTAssertEqual(snapshot.cards.first?.turn, 93)
         XCTAssertEqual(snapshot.cards.first?.entries.first?.message, "a")
+        XCTAssertEqual(snapshot.cards.first?.entries.first?.time, t0)
         XCTAssertNil(snapshot.cards.first?.entries.first?.turn)
     }
 }
