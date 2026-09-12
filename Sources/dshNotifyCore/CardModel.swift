@@ -105,6 +105,7 @@ public final class CardModel {
     public func index(of entry: CompletionEntry) -> Int? {
         entries.firstIndex {
             $0.time == entry.time && $0.message == entry.message && $0.kind == entry.kind
+                && $0.detail == entry.detail && $0.turn == entry.turn
         }.map { $0 + 1 }
     }
 

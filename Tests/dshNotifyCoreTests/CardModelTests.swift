@@ -185,6 +185,17 @@ final class PerRowTurnTests: XCTestCase {
         XCTAssertEqual(m.entries.map(\.message), ["b"])
     }
 
+    func testIdenticalRowsStayDistinguishableByDetailAndTurn() {
+        let m = CardModel()
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        m.addCompletion(message: "same", kind: .error, detail: "E1", at: t, turn: 60)
+        m.addCompletion(message: "same", kind: .error, detail: "E2", at: t, turn: 61)
+        let second = m.entries[1]
+        XCTAssertEqual(m.index(of: second), 2)
+        _ = m.removeCompletion(index: 1)
+        XCTAssertEqual(m.removeCompletion(matching: second)?.detail, "E2")
+    }
+
     func testRemoveCompletionByMissingIdentityIsANoOp() {
         let m = CardModel()
         let t = Date(timeIntervalSince1970: 1_700_000_000)

@@ -248,20 +248,26 @@ final class NotificationCard: NSObject {
     ) -> JumpPolicy.JumpOutcome {
         switch action {
         case "open-folder":
-            if let path, !path.isEmpty {
-                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-                // Revealing in Finder is only *visible* if Finder came forward;
-                // otherwise report unconfirmed so the card is kept for a retry
-                // instead of vanishing over a no-op (AI review, severity 4).
-                return BrowserJumper.confirmFrontmost(bundleId: "com.apple.finder")
+            guard let path, !path.isEmpty else {
+                // Degenerate payload: nothing to reveal, so there is also
+                // nothing that could be invisible to the user. Reporting
+                // `unconfirmed` here would leave a card that can never be
+                // clicked away (only a drag would clear it).
+                dshLog("[action] open-folder without a path; dismissing as no-op\n")
+                return .notApplicable
             }
-            return .unconfirmed
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+            // Revealing in Finder is only *visible* if Finder came forward;
+            // otherwise report unconfirmed so the card is kept for a retry
+            // instead of vanishing over a no-op (AI review, severity 4).
+            return BrowserJumper.confirmFrontmost(bundleId: "com.apple.finder")
         case "open-web":
-            if let url, let parsed = URL(string: url) {
-                NSWorkspace.shared.open(parsed)
-                return BrowserJumper.confirmFrontmostBrowser()
+            guard let url, let parsed = URL(string: url) else {
+                dshLog("[action] open-web without a usable URL; dismissing as no-op\n")
+                return .notApplicable
             }
-            return .unconfirmed
+            NSWorkspace.shared.open(parsed)
+            return BrowserJumper.confirmFrontmostBrowser()
         case "jump-web":
             // Jump the browser to this completion's own position: an aggregated
             // card gives every row its own anchor, so row N scrolls to the turn

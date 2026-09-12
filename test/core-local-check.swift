@@ -126,6 +126,15 @@ check(
     "removing an already-gone row is a no-op"
 )
 
+let twinModel = CardModel()
+let twinTime = Date(timeIntervalSince1970: 1_700_000_000)
+twinModel.addCompletion(message: "same", kind: .error, detail: "E1", at: twinTime, turn: 60)
+twinModel.addCompletion(message: "same", kind: .error, detail: "E2", at: twinTime, turn: 61)
+let secondTwin = twinModel.entries[1]
+checkEqual(twinModel.index(of: secondTwin), 2, "identical message/kind/time rows stay distinguishable by detail+turn")
+_ = twinModel.removeCompletion(index: 1)
+checkEqual(twinModel.removeCompletion(matching: secondTwin)?.detail, "E2", "identity removal keeps the right twin")
+
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
 checkEqual(
     JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "abc", turn: 60),
