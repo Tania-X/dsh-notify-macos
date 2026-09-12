@@ -173,6 +173,51 @@ public enum JumpPolicy {
         case notApplicable
     }
 
+    /// A window's frame, in screen coordinates (top-left origin), kept free of
+    /// CoreGraphics so the matching rule stays unit-testable.
+    public struct WindowBounds: Equatable {
+        public var x: Double
+        public var y: Double
+        public var width: Double
+        public var height: Double
+
+        public init(x: Double, y: Double, width: Double, height: Double) {
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+        }
+    }
+
+    /// Slack when matching a window reported by AppleScript against the
+    /// on-screen window list: the two APIs do not always agree to the pixel
+    /// (title-bar/shadow rounding), and an exact match would make us escalate
+    /// for nothing.
+    public static let windowBoundsTolerance: Double = 8
+
+    /// Whether two window frames describe the same window.
+    public static func boundsMatch(
+        _ a: WindowBounds, _ b: WindowBounds, tolerance: Double = windowBoundsTolerance
+    ) -> Bool {
+        abs(a.x - b.x) <= tolerance && abs(a.y - b.y) <= tolerance
+            && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+
+    /// Whether the window with `host` bounds is among the windows the system
+    /// currently reports ON SCREEN — i.e. it is on the user's active Space, not
+    /// minimized, not hidden.
+    ///
+    /// This is the window-level truth the app-level "is the browser frontmost"
+    /// check was missing: with two browser windows on two Spaces, activating the
+    /// app shows the CURRENT Space's window, so the hosting window can stay
+    /// invisible while the app is perfectly frontmost (reported by the user:
+    /// "it jumps, but it brings up the Safari on the current desktop").
+    public static func isWindowOnScreen(
+        _ host: WindowBounds, among onScreen: [WindowBounds]
+    ) -> Bool {
+        onScreen.contains { boundsMatch(host, $0) }
+    }
+
     /// Whether the card/row may be dropped after an action with this outcome.
     /// Only `unconfirmed` keeps it — `visible` is done, `notApplicable` was
     /// never about a jump.

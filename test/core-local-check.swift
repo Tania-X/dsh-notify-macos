@@ -135,6 +135,19 @@ checkEqual(twinModel.index(of: secondTwin), 2, "identical message/kind/time rows
 _ = twinModel.removeCompletion(index: 1)
 checkEqual(twinModel.removeCompletion(matching: secondTwin)?.detail, "E2", "identity removal keeps the right twin")
 
+// --- 窗口级可见性：应用在前台 ≠ 宿主窗口在你眼前 ---
+let hostWindow = JumpPolicy.WindowBounds(x: 0, y: 25, width: 1440, height: 875)
+let otherWindow = JumpPolicy.WindowBounds(x: 240, y: 120, width: 900, height: 600)
+check(JumpPolicy.boundsMatch(hostWindow, JumpPolicy.WindowBounds(x: 3, y: 22, width: 1443, height: 878)),
+      "bounds match tolerates sub-pixel/titlebar differences")
+check(!JumpPolicy.boundsMatch(hostWindow, otherWindow), "different windows never match")
+check(JumpPolicy.isWindowOnScreen(hostWindow, among: [otherWindow, hostWindow]),
+      "hosting window found among on-screen windows")
+check(!JumpPolicy.isWindowOnScreen(hostWindow, among: [otherWindow]),
+      "another window of the same app on screen does NOT count as the hosting window")
+check(!JumpPolicy.isWindowOnScreen(hostWindow, among: []),
+      "no on-screen windows at all = hosting window is not visible")
+
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
 checkEqual(
     JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "abc", turn: 60),

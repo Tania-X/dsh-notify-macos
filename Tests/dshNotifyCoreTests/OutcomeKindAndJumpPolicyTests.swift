@@ -65,6 +65,23 @@ final class JumpPolicyTests: XCTestCase {
         XCTAssertFalse(JumpPolicy.shouldDismissCard(after: .unconfirmed))
     }
 
+    // MARK: Window-level visibility (app frontmost ≠ hosting window shown)
+
+    func testBoundsMatchToleratesSmallDisagreement() {
+        let host = JumpPolicy.WindowBounds(x: 100, y: 50, width: 1200, height: 800)
+        XCTAssertTrue(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 104, y: 46, width: 1204, height: 796)))
+        XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 140, y: 50, width: 1200, height: 800)))
+        XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 100, y: 50, width: 900, height: 800)))
+    }
+
+    func testHostingWindowIsRecognisedOnlyWhenOnScreen() {
+        let host = JumpPolicy.WindowBounds(x: 0, y: 25, width: 1440, height: 875)
+        let otherSpaceWindow = JumpPolicy.WindowBounds(x: 200, y: 100, width: 900, height: 600)
+        XCTAssertTrue(JumpPolicy.isWindowOnScreen(host, among: [otherSpaceWindow, host]))
+        XCTAssertFalse(JumpPolicy.isWindowOnScreen(host, among: [otherSpaceWindow]))
+        XCTAssertFalse(JumpPolicy.isWindowOnScreen(host, among: []))
+    }
+
     func testShouldRetryOnlyWhenDeniedAndPassesRemain() {
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 1, sawDenied: true))
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 2, sawDenied: true))

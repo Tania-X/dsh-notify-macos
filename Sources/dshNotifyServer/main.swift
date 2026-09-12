@@ -808,33 +808,78 @@ enum BrowserJumper {
     /// frontmost afterwards we escalate ONCE and log the whole trail: this is
     /// the reported "clicked the card, it vanished, nothing jumped" case — the
     /// AppleScript had navigated the tab, but the window never came into view.
-    private static func bringBrowserForward(_ appName: String) -> Bool {
+    private static func bringBrowserForward(
+        _ appName: String, hostBounds: JumpPolicy.WindowBounds? = nil
+    ) -> Bool {
         guard let channel = BrowserCatalog.channel(appName: appName) else { return false }
         let before = frontmostBundleId()
         let weakResult = activateApp(appName)
         var frontmost = frontmostBundleId()
+        var shown = hostingWindowVisibility(bundleId: channel.bundleId, hostBounds: hostBounds)
+
+        // App-frontmost is NOT enough: with the hosting window on another Space
+        // (or minimized/hidden) the app can be perfectly frontmost while the
+        // user still looks at a DIFFERENT window of it. Escalate whenever the
+        // hosting WINDOW is not on the active Space.
+        let needsEscalation = !((frontmost == channel.bundleId) && (shown != false))
         var escalated = false
-        if JumpPolicy.shouldEscalateActivation(browserIsFrontmost: frontmost == channel.bundleId) {
+        if needsEscalation {
             escalated = true
             dshLog(
-                "[activate] \(appName) not frontmost after weak activate"
-                + " (returned=\(weakResult) frontmost=\(frontmost ?? "nil") before=\(before ?? "nil"))"
+                "[activate] \(appName) hosting window not in front"
+                + " (appFrontmost=\(frontmost == channel.bundleId) windowOnScreen=\(describe(shown))"
+                + " returned=\(weakResult) before=\(before ?? "nil"))"
                 + "; escalating to activateAllWindows\n"
             )
             _ = activateApp(appName, allWindows: true)
             let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
             while Date() < deadline {
                 frontmost = frontmostBundleId()
-                if frontmost == channel.bundleId { break }
+                shown = hostingWindowVisibility(bundleId: channel.bundleId, hostBounds: hostBounds)
+                if frontmost == channel.bundleId && shown != false { break }
                 Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
             }
+            // Last resort: AppleScript's legacy `activate` raises the app's
+            // windows onto the user's Space. Deliberately NOT used first — it
+            // drags every window of the app along (the reason the modern API is
+            // preferred) — but with the hosting window still out of sight
+            // "raise too much" beats "the user sees nothing".
+            if shown == false || frontmost != channel.bundleId {
+                dshLog(
+                    "[activate] still not in front after activateAllWindows"
+                    + " (windowOnScreen=\(describe(shown)) frontmost=\(frontmost ?? "nil"))"
+                    + "; falling back to AppleScript activate\n"
+                )
+                _ = runOSAScript(
+                    "tell application \(asString(appName)) to activate", label: "activate-\(appName)"
+                )
+                let finalDeadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
+                while Date() < finalDeadline {
+                    frontmost = frontmostBundleId()
+                    shown = hostingWindowVisibility(bundleId: channel.bundleId, hostBounds: hostBounds)
+                    if frontmost == channel.bundleId && shown != false { break }
+                    Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
+                }
+            }
         }
-        let visible = frontmost == channel.bundleId
+        let appFrontmost = frontmost == channel.bundleId
+        // `shown == nil` (no bounds reported) falls back to the app-level check
+        // so an unusable AppleScript reply can never make us report "invisible".
+        let visible = appFrontmost && shown != false
         dshLog(
-            "[activate] \(appName) frontmost=\(frontmost ?? "nil") visible=\(visible)"
-            + " escalated=\(escalated) before=\(before ?? "nil")\n"
+            "[activate] \(appName) frontmost=\(appFrontmost) windowOnScreen=\(describe(shown))"
+            + " visible=\(visible) escalated=\(escalated) before=\(before ?? "nil")\n"
         )
         return visible
+    }
+
+    /// Render the tri-state window visibility for the log.
+    private static func describe(_ shown: Bool?) -> String {
+        switch shown {
+        case .some(true): return "true"
+        case .some(false): return "false"
+        case .none: return "unknown"
+        }
     }
 
     /// Focus the browser window/tab already showing `guiUrl` (no URL change —
@@ -863,6 +908,7 @@ enum BrowserJumper {
                 if miniaturized of hostWindow then set miniaturized of hostWindow to false
                 set current tab of hostWindow to targetTab
                 set index of hostWindow to 1
+                return bounds of hostWindow
               else
                 error "dsh-no-tab"
               end if
@@ -889,17 +935,19 @@ enum BrowserJumper {
                 end try
                 set active tab index of hostWindow to (index of targetTab)
                 set index of hostWindow to 1
+                return bounds of hostWindow
               else
                 error "dsh-no-tab"
               end if
             end tell
             """
         }
-        let outcome = classify(runOSAScript(script, label: "focus-\(appName)"))
+        let result = runOSAScript(script, label: "focus-\(appName)")
+        let outcome = classify(result)
         var visible = false
         if outcome == .hosted {
             dshLog("[focus] \(appName) tab raised; modern-activating\n")
-            visible = bringBrowserForward(appName)
+            visible = bringBrowserForward(appName, hostBounds: parseHostBounds(result.stdout))
         }
         return (outcome, visible)
     }
@@ -935,6 +983,7 @@ enum BrowserJumper {
                 set URL of targetTab to \(asString(targetURL))
                 set current tab of hostWindow to targetTab
                 set index of hostWindow to 1
+                return bounds of hostWindow
               else
                 error "dsh-no-tab"
               end if
@@ -968,14 +1017,16 @@ enum BrowserJumper {
               on error
                 open location \(asString(targetURL))
               end try
+              return bounds of hostWindow
             end tell
             """
         }
-        let outcome = classify(runOSAScript(script, label: "navigate-\(appName)"))
+        let result = runOSAScript(script, label: "navigate-\(appName)")
+        let outcome = classify(result)
         var visible = false
         if outcome == .hosted {
             dshLog("[navigate] \(appName) tab updated; modern-activating\n")
-            visible = bringBrowserForward(appName)
+            visible = bringBrowserForward(appName, hostBounds: parseHostBounds(result.stdout))
         }
         return (outcome, visible)
     }
@@ -1115,6 +1166,58 @@ enum BrowserJumper {
             dshLog("[jump] open failed: \(error)\n")
             return .unconfirmed
         }
+    }
+
+    /// Parse the `{left, top, right, bottom}` list AppleScript prints for
+    /// `bounds of hostWindow` into a frame. nil when the output is unusable —
+    /// callers then fall back to the app-level check instead of guessing.
+    private static func parseHostBounds(_ stdout: String) -> JumpPolicy.WindowBounds? {
+        let cleaned = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
+        let parts = cleaned.split(separator: ",").compactMap {
+            Double($0.trimmingCharacters(in: .whitespaces))
+        }
+        guard parts.count == 4 else { return nil }
+        let width = parts[2] - parts[0]
+        let height = parts[3] - parts[1]
+        guard width > 0, height > 0 else { return nil }
+        return JumpPolicy.WindowBounds(x: parts[0], y: parts[1], width: width, height: height)
+    }
+
+    /// Frames of every window the system currently reports ON SCREEN for that
+    /// browser — i.e. windows on the user's ACTIVE Space (minimized, hidden and
+    /// other-Space windows are excluded). This is the ground truth the
+    /// app-level check lacked; layer 0 keeps out shadows/menus.
+    private static func onScreenWindows(bundleId: String) -> [JumpPolicy.WindowBounds] {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == bundleId
+        }) else { return [] }
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
+        return list.compactMap { info in
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+                    == app.processIdentifier else { return nil }
+            guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { return nil }
+            guard let dict = info[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: dict as CFDictionary)
+            else { return nil }
+            return JumpPolicy.WindowBounds(
+                x: Double(rect.origin.x), y: Double(rect.origin.y),
+                width: Double(rect.width), height: Double(rect.height)
+            )
+        }
+    }
+
+    /// Whether the hosting window itself is on screen (app-frontmost is NOT
+    /// enough: with two windows on two Spaces, activating the app shows the
+    /// current Space's window while the hosting one stays invisible).
+    /// nil = unknown (no bounds from AppleScript) → fall back to app level.
+    private static func hostingWindowVisibility(
+        bundleId: String, hostBounds: JumpPolicy.WindowBounds?
+    ) -> Bool? {
+        guard let hostBounds else { return nil }
+        return JumpPolicy.isWindowOnScreen(hostBounds, among: onScreenWindows(bundleId: bundleId))
     }
 
     /// Whether a catalogued browser is frontmost right now.

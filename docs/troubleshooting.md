@@ -341,3 +341,20 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 **修法**：`Sources/dshNotifyServer/main.swift` 在 main 顶部 `signal(SIGPIPE, SIG_IGN)` —— 作为 socket 服务端，对端提前挂断绝不能杀死守护进程；写失败已被忽略，现在不再致命。探测脚本补上结尾 `\n`（并注明协议要求）。`test/socket-smoke.sh` 新增断言永久锁住这条：**发一条不带换行的请求后立刻挂断，daemon 必须仍然存活**（`PASS: daemon survives a peer that hangs up mid-request (SIGPIPE)`）。
 
 **附带收获**：这两周里 daemon 每次意外死掉都能被插件重新拉起（第 15 号 PR 的自愈逻辑），本次现场也复现了两次（PID 32114 → 32162 → 32244），并且**插件拉起的 daemon 能正常驱动 Safari、没有 `-10004`** —— 说明 Automation 授权沿 GUI server 的责任链继承，人工在终端里起 daemon 已非必需。
+
+## 22. 「应用在前台」≠「宿主窗口在你眼前」：窗口级可见性判定
+
+**用户实测反馈（2026-09-12）**：点卡片后**确实跳转了**，但抬起来的是**当前桌面的那个 Safari 窗口**，不是 GUI 所在的 Safari；用户自己切回 GUI 才看到会话已经跳好。
+
+**为什么 §20 的修复没覆盖到**：那一版的“可见”判据是**应用级** —— 只检查 `NSWorkspace.frontmostApplication` 的 bundleId 是不是 Safari。于是当宿主窗口在**另一个桌面/Space**时：弱激活把 Safari 抬成前台（bundleId 匹配 ✅）→ 日志自信地写 `visible=true` → 卡片被消除，而用户眼前是**同一 App 的另一个窗口**。AppleScript 里的 `set index of hostWindow to 1` 只是在 Safari **内部**排序，无法把别的 Space 的窗口搬到当前桌面。
+
+**修法（窗口级判据 + 两级升级）**：
+
+1. AppleScript 在切/聚焦标签后 `return bounds of hostWindow`，把宿主窗口的 `{left, top, right, bottom}` 从 stdout 带回来；
+2. daemon 用 `CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements])` 取该浏览器 **PID 下、layer 0、当前真的在屏**（= 用户当前 Space 上）的窗口 frame；
+3. 判定 `JumpPolicy.isWindowOnScreen(host, among:)`（`boundsMatch` 带 8px 容差，纯函数、有单测）。**宿主窗口不在屏 → 才升级**：
+   - 第一级 `activate(options: [.activateAllWindows])`（把该 App 的窗口抬到当前桌面）；
+   - 仍不在屏 → 第二级退回 AppleScript 旧语义 `tell application "<app>" to activate`（会把该 App 的窗口全部拉到用户桌面 —— 这正是当初为了避免打扰其它 Space 才弃用的行为，所以只做最后兜底：「抬得太多」也好过「用户什么都看不到」）；
+4. 日志新增 `windowOnScreen=true|false|unknown`；取不到 bounds 时返回 `unknown` 并**退回应用级判据**，绝不因为解析失败而误报不可见。
+
+**测试**：`JumpPolicy.boundsMatch` / `isWindowOnScreen` 的 XCTest 与 `test/core-local-check.sh` 断言（含「同一 App 的另一个窗口在屏**不算**宿主窗口可见」这条关键用例）；冒烟 10/10。
