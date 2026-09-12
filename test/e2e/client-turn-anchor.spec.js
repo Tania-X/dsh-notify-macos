@@ -121,3 +121,20 @@ test("seek never clicks unrelated history-looking controls", async ({ page }) =>
   await page.waitForTimeout(500);
   expect(await page.evaluate(() => window.__decoyClicks ?? 0)).toBe(0);
 });
+
+test("keeps paging when the load-older control is temporarily disabled", async ({ page }) => {
+  // Regression for the growth counter: windows where the control was disabled
+  // must not count as "loaded nothing", or the seek gives up (~1.5s) before the
+  // control becomes usable (1.6s here) and never finds the anchor.
+  await page.goto(`${HARNESS}?lazy=1&slow=1#dsh-notify-macos/session=${SID}&turn=1`);
+  await page.waitForFunction(() => window.__test !== undefined);
+  await expect
+    .poll(() => page.evaluate(() => window.__olderPagesLoaded ?? 0), { timeout: 15000 })
+    .toBeGreaterThanOrEqual(3);
+  await expect
+    .poll(async () => {
+      const m = await rowTop(page, "9:turn-tail1");
+      return m !== null && m.topInViewport > m.clientHeight * 0.4 && m.topInViewport < m.clientHeight * 0.8;
+    }, { timeout: 12000 })
+    .toBe(true);
+});

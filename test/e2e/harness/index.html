@@ -45,7 +45,11 @@
 
       // Lazy mode mimics the real GUI: only a window of recent turns is
       // rendered, and reaching the top pages older turns in.
-      var LAZY = new URLSearchParams(location.search).has("lazy");
+      var PARAMS = new URLSearchParams(location.search);
+      var LAZY = PARAMS.has("lazy");
+      // slow=1: the paging control starts DISABLED (like the real GUI while a
+      // page is still rendering) and becomes usable a moment later.
+      var LAZY_SLOW = PARAMS.has("slow");
       var pendingOlderTurns = [];
 
       function appendTurn(c, turn) {
@@ -61,6 +65,13 @@
         var btn = document.createElement("button");
         btn.className = "decoy-history";
         btn.textContent = "历史记录";
+        if (LAZY_SLOW) {
+          btn.disabled = true;
+          window.setTimeout(function () {
+            btn.disabled = false;
+            window.__olderEnabledAt = Date.now();
+          }, 1600);
+        }
         btn.addEventListener("click", function () {
           window.__decoyClicks = (window.__decoyClicks || 0) + 1;
         });
