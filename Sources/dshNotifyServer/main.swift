@@ -292,6 +292,26 @@ final class NotificationCard: NSObject {
     }
 
     /// Dismiss: animate off to the right edge, then remove.
+    /// Animation budget for "fling out to the right, then fade".
+    ///
+    /// The previous version moved and faded over the SAME 0.22s, and a drag had
+    /// already carried the card to the screen edge — so the visible part was
+    /// mostly a fade, i.e. it read as "it just vanished" (user feedback: make
+    /// the fly-out + fade more obvious). Now the travel gets the whole window
+    /// and the fade only starts in the tail, so the card is seen leaving first.
+    private enum Dismiss {
+        /// Total travel time.
+        static let travelSeconds: Double = 0.34
+        /// When the fade starts (fraction of `travelSeconds`).
+        static let fadeDelayFraction: Double = 0.55
+        static let fadeSeconds: Double = 0.15
+        /// Minimum travel so the fling is visible even when the drag already
+        /// parked the card at the screen edge.
+        static let minTravel: CGFloat = 220
+        /// Margin past the screen edge.
+        static let offscreenMargin: CGFloat = 24
+    }
+
     func dismiss() {
         guard !removing else { return }
         removing = true
@@ -299,13 +319,32 @@ final class NotificationCard: NSObject {
             removeNow()
             return
         }
-        let target = NSPoint(x: screen.visibleFrame.maxX + 40, y: window.frame.origin.y)
+        let frame = window.frame
+        // Always travel at least `minTravel` from wherever the drag left it,
+        // and always end fully off-screen.
+        let targetX = max(
+            screen.visibleFrame.maxX + Dismiss.offscreenMargin + frame.width,
+            frame.origin.x + Dismiss.minTravel
+        )
+        let target = NSPoint(x: targetX, y: frame.origin.y)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            context.duration = Dismiss.travelSeconds
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)  // accelerate away
             window.animator().setFrameOrigin(target)
-            window.animator().alphaValue = 0
-        } completionHandler: { [weak self] in
+        }
+        // Fade in the tail only: the card is seen flying out first, then it
+        // dissolves (rather than sliding out while already transparent).
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Dismiss.travelSeconds * Dismiss.fadeDelayFraction
+        ) { [weak self] in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Dismiss.fadeSeconds
+                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                self.window.animator().alphaValue = 0
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Dismiss.travelSeconds) { [weak self] in
             self?.removeNow()
         }
     }
