@@ -71,8 +71,8 @@ else
 fi
 
 # --- show frames: merge, kinds, degenerate inputs ---
-R=$(py '[{"cmd":"show","kind":"completed","sessionId":"smoke-a","sessionTitle":"A","message":"done","sound":false},
-         {"cmd":"show","kind":"completed","sessionId":"smoke-a","sessionTitle":"A","message":"done again","sound":false},
+R=$(py '[{"cmd":"show","kind":"completed","sessionId":"smoke-a","sessionTitle":"A","message":"done","turn":11,"sound":false},
+         {"cmd":"show","kind":"completed","sessionId":"smoke-a","sessionTitle":"A","message":"done again","turn":12,"sound":false},
          {"cmd":"show","kind":"error","sessionId":"smoke-b","sessionTitle":"B","message":"boom","detail":"err","sound":false},
          {"cmd":"show","kind":"blocked","sessionId":"smoke-c","sessionTitle":"C","message":"wait","detail":"tool-x","sound":false},
          {"cmd":"show","kind":"weird-kind","sessionId":"smoke-d","message":"x","sound":false},
@@ -102,6 +102,28 @@ if grep -q '"turn" : 5\|"turn": 5\|"turn" : 5' "$CARDS" 2>/dev/null || grep -q '
   ok "turn anchor persisted in the snapshot"
 else
   bad "turn anchor missing from snapshot"
+fi
+
+# --- EVERY merged row keeps its own anchor (position-indexed jumps) ---
+ROWTURNS=$(python3 - "$CARDS" <<'PYEOF2'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception as exc:
+    print("unreadable: %s" % exc)
+    raise SystemExit(0)
+for card in data.get("cards", []):
+    if card.get("sessionId") == "smoke-a":
+        print("card=%s rows=%s" % (card.get("turn"), [e.get("turn") for e in card.get("entries", [])]))
+        break
+else:
+    print("smoke-a card missing")
+PYEOF2
+)
+if [ "$ROWTURNS" = "card=12 rows=[11, 12]" ]; then
+  ok "per-row turn anchors persisted (merged card: $ROWTURNS)"
+else
+  bad "per-row turn anchors wrong: $ROWTURNS"
 fi
 
 # --- persistence: cards must survive a daemon restart ---

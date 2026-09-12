@@ -163,10 +163,18 @@ final class NotificationCard: NSObject {
     /// Append one completion, merging into this card. Recomputes the frame
     /// for collapsed/expanded height. Returns the entry index (1-based).
     @discardableResult
-    func addCompletion(message: String, kind: OutcomeKind, detail: String?, at time: Date = Date()) -> Int {
-        let index = model.addCompletion(message: message, kind: kind, detail: detail, at: time)
+    func addCompletion(
+        message: String, kind: OutcomeKind, detail: String?, at time: Date = Date(), turn: Int? = nil
+    ) -> Int {
+        let index = model.addCompletion(message: message, kind: kind, detail: detail, at: time, turn: turn)
         updateFrame()
         return index
+    }
+
+    /// Jump anchor for one row: that completion's own turn, falling back to the
+    /// card-level turn (newest completion) when the row has none.
+    func jumpTurn(forRow row: Int?) -> Int? {
+        model.jumpTurn(forRow: row, cardTurn: turn)
     }
 
     /// Remove one completion by its 1-based arrival index (state in the
@@ -218,7 +226,7 @@ final class NotificationCard: NSObject {
     /// Card clicks always deep-link to the card's session (blocked included:
     /// its pending approval/ask lives at that session's newest message). The
     /// `focusOnly` switch is retained solely for the socket `debug` command.
-    func performAction(focusOnly: Bool = false) {
+    func performAction(focusOnly: Bool = false, turn turnOverride: Int? = nil) {
         switch action {
         case "open-folder":
             if let path, !path.isEmpty {
@@ -229,12 +237,12 @@ final class NotificationCard: NSObject {
                 NSWorkspace.shared.open(parsed)
             }
         case "jump-web":
-            // Jump the browser to the finished conversation's completion point.
-            // (Position-indexed jumps are a later iteration; for now every row
-            // targets the session's newest message.)
+            // Jump the browser to this completion's own position: an aggregated
+            // card gives every row its own anchor, so row N scrolls to the turn
+            // THAT completion happened in (card-wide `turn` is the newest).
             BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
-                turn: turn, focusOnly: focusOnly
+                turn: turnOverride ?? turn, focusOnly: focusOnly
             )
         default:
             break
@@ -534,7 +542,7 @@ final class CardView: NSView {
     /// BLOCKED rows deep-link to their session like any other; removing the
     /// row just marks it handled.
     private func jumpAndRemoveRow(_ card: NotificationCard, row: Int) {
-        jump(card)
+        jump(card, turn: card.jumpTurn(forRow: row))
         let removed = card.removeCompletion(index: row)
         if removed != nil {
             if card.completionCount == 0 {
@@ -551,9 +559,9 @@ final class CardView: NSView {
     }
 
     /// Dispatch the card action off the main thread when it drives a browser.
-    private func jump(_ card: NotificationCard, focusOnly: Bool = false) {
+    private func jump(_ card: NotificationCard, focusOnly: Bool = false, turn: Int? = nil) {
         let action = card.action
-        let run = { card.performAction(focusOnly: focusOnly) }
+        let run = { card.performAction(focusOnly: focusOnly, turn: turn) }
         if action == "jump-web" {
             DispatchQueue.global(qos: .userInitiated).async(execute: run)
         } else {
@@ -1003,7 +1011,8 @@ final class CardStack {
                     message: entry.message,
                     kind: OutcomeKind.parse(entry.kind),
                     detail: entry.detail,
-                    at: entry.time
+                    at: entry.time,
+                    turn: entry.turn
                 )
             }
             card.onRemoved = { [weak self] removed in
@@ -1079,7 +1088,7 @@ final class CardStack {
         // Merge into an existing card for the same session.
         if let sessionId = request.sessionId, !sessionId.isEmpty,
            let existing = cards.first(where: { $0.sessionId == sessionId }) {
-            existing.addCompletion(message: message, kind: kind, detail: detail)
+            existing.addCompletion(message: message, kind: kind, detail: detail, turn: request.turn)
             if let turn = request.turn { existing.turn = turn }   // newest completion wins
             relayout(animated: false)
             if request.sound == true { NSSound(named: NSSound.Name("Glass"))?.play() }
@@ -1096,7 +1105,7 @@ final class CardStack {
             autoDismissSec: request.autoDismissSec,
             turn: request.turn
         )
-        card.addCompletion(message: message, kind: kind, detail: detail)
+        card.addCompletion(message: message, kind: kind, detail: detail, turn: request.turn)
         card.onRemoved = { [weak self] removed in
             self?.remove(removed)
         }

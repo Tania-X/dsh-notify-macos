@@ -167,4 +167,48 @@ final class SnapshotTurnTests: XCTestCase {
         store.save(CardStackSnapshot(cards: [card]))
         XCTAssertEqual(store.load().cards.first?.turn, 91)
     }
+
+    /// Rows of an aggregated card keep their individual anchors across a
+    /// daemon restart (the file is the only memory the daemon has).
+    func testPerRowTurnsSurviveSnapshotRoundTrip() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsh-notify-rowturn-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = CardStackStore(url: url)
+        let card = SnapshotCard(
+            sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+            autoDismissSec: nil, turn: 93, expanded: true,
+            entries: [
+                SnapshotEntry(message: "a", time: Date(timeIntervalSince1970: 1), kind: "completed", detail: nil, index: 1, turn: 93),
+                SnapshotEntry(message: "b", time: Date(timeIntervalSince1970: 2), kind: "completed", detail: nil, index: 2, turn: 61),
+                SnapshotEntry(message: "c", time: Date(timeIntervalSince1970: 3), kind: "completed", detail: nil, index: 3),
+            ]
+        )
+        store.save(CardStackSnapshot(cards: [card]))
+        let loaded = store.load().cards.first
+        XCTAssertEqual(loaded?.entries.map(\.turn), [93, 61, nil])
+        XCTAssertEqual(loaded?.entries.map { CompletionEntry(snapshot: $0).turn }, [93, 61, nil])
+    }
+
+    /// Snapshot files written before per-row anchors existed (no `turn` key on
+    /// entries) must still load — otherwise an upgrade wipes live cards.
+    func testLegacySnapshotWithoutPerRowTurnLoads() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsh-notify-legacy-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let legacy = """
+        {"version":\(CardStackSnapshot.currentVersion),"cards":[{"sessionId":"s","sessionTitle":"T",\
+        "action":"jump-web","url":null,"path":null,"expanded":false,"turn":93,\
+        "entries":[{"message":"a","time":1,"kind":"completed","detail":null,"index":1}]}]}
+        """
+        try legacy.write(to: url, atomically: true, encoding: .utf8)
+        let (snapshot, diagnostic) = CardStackStore(url: url).loadWithDiagnostic()
+        guard case .loaded(let count) = diagnostic else {
+            return XCTFail("legacy snapshot should load, got \(diagnostic)")
+        }
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(snapshot.cards.first?.turn, 93)
+        XCTAssertEqual(snapshot.cards.first?.entries.first?.message, "a")
+        XCTAssertNil(snapshot.cards.first?.entries.first?.turn)
+    }
 }

@@ -28,6 +28,15 @@ public final class CardModel {
     public var newestEntry: CompletionEntry? { entries.last }
     public var isCollapsed: Bool { !expanded }
 
+    /// Jump anchor for one row (1-based). Every completion keeps its OWN turn,
+    /// so the rows of an aggregated card each land on their own position; a row
+    /// without one falls back to `cardTurn` (the card's newest completion).
+    /// Out-of-range rows (header click / empty card) also fall back.
+    public func jumpTurn(forRow row: Int?, cardTurn: Int?) -> Int? {
+        guard let row, row >= 1, row <= entries.count else { return cardTurn }
+        return entries[row - 1].turn ?? cardTurn
+    }
+
     /// Whether the card contains any entry of the given kind.
     public func contains(kind: OutcomeKind) -> Bool {
         entries.contains { $0.kind == kind }
@@ -74,9 +83,14 @@ public final class CardModel {
     /// Append one completion. Recomputes nothing UI-related; returns the new
     /// entry index (1-based).
     @discardableResult
-    public func addCompletion(message: String, kind: OutcomeKind, detail: String?, at time: Date = Date()) -> Int {
+    public func addCompletion(
+        message: String, kind: OutcomeKind, detail: String?, at time: Date = Date(), turn: Int? = nil
+    ) -> Int {
         entries.append(
-            CompletionEntry(message: message, time: time, kind: kind, detail: detail, index: entries.count + 1)
+            CompletionEntry(
+                message: message, time: time, kind: kind, detail: detail,
+                index: entries.count + 1, turn: turn
+            )
         )
         return entries.count
     }
@@ -91,7 +105,7 @@ public final class CardModel {
         for (i, entry) in entries.enumerated() {
             entries[i] = CompletionEntry(
                 message: entry.message, time: entry.time,
-                kind: entry.kind, detail: entry.detail, index: i + 1
+                kind: entry.kind, detail: entry.detail, index: i + 1, turn: entry.turn
             )
         }
         if entries.count <= 1 { expanded = false }  // auto-collapse to single

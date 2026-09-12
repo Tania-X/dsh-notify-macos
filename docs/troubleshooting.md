@@ -213,3 +213,23 @@ BEFORE: scrollTop=7303(=max, 底部), turn-tail91 未渲染
 AFTER : scrollTop=3853, scrollHeight 7303→15895（历史已翻页加载）,
         turn-tail91 在视口 386/644px ≈ 60% → inBand, 未到底部
 ```
+
+### 18.2 聚合卡的锚点是**逐行**的（每行跳自己的位置）
+
+**问题**：锚点最初挂在**卡片**上（`NotificationCard.turn`），而同一 session 的多次完成会聚合成一张卡 —— 合并时把 `turn` 覆盖成最新那次，于是展开后点**任何**一行都跳最新位置，“位置索引”在聚合卡上退化成“跳底部”。
+
+**修法**：锚点下沉到**完成条目**（每行一个）：
+
+| 层 | 字段 | 说明 |
+| --- | --- | --- |
+| host | 每帧 show 载荷的 `turn` | 本来就按事件逐次下发，无需改动 |
+| Core | `CompletionEntry.turn` / `SnapshotEntry.turn` | 随行存储；`removeCompletion` 重排索引时**保留**各自的锚点 |
+| Core | `CardModel.jumpTurn(forRow:cardTurn:)` | 点第 N 行 → 该行的 `turn`；该行没有（旧卡片）或行号越界（表头/空白）→ 回落卡片级 `turn`；两者都无 → `nil`（client 端继续回退“钉最新”） |
+| daemon | `ShowRequest.turn` → `addCompletion(turn:)` | 合并路径也只更新**该行**，同时把卡片级 `turn` 记为最新（单行卡片/表头沿用） |
+| daemon | `performAction(focusOnly:turn:)` | 行点击把该行锚点透传给 `BrowserJumper.jump`，日志 `[jump] target=… (turn=N)` 可直接看到用的是哪一行 |
+
+**兼容性**：`turn` 是可选字段，**旧快照**（条目里没有 `turn` 键）仍能加载，那些行回落卡片级锚点 —— 升级不会清空正在显示的卡片。
+
+**测试**：XCTest `PerRowTurnTests`（逐行独立锚点 / 重排后不丢 / 回落规则）+ 快照往返与旧文件兼容；`socket-smoke.sh` 断言合并卡落盘后是 `card=12 rows=[11, 12]`（同一 session 两帧不同 turn，各自保留）。
+
+**边界测试夹具**：`test/manual/push-anchors.py <socket> <sessionId> <turn>[:<标签>] ...` —— 对同一 session 连推多帧、每帧一个历史 turn，聚合成一张卡；逐行点击即可验证“窗口内 / 窗口外（需翻页）/ 极早 / 不存在的 turn（应回退最新）”四个边界。
