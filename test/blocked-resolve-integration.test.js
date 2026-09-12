@@ -110,7 +110,11 @@ afterEach(() => {
   }
 });
 
-describe("blocked card cleanup over the real socket", () => {
+// macOS-only by construction: `apply()` deliberately early-returns on other
+// platforms ("not on macOS; notifications disabled"), so there are no handlers
+// to drive there. The pure-function suite (blocked-resolve.test.js) still runs
+// everywhere; CI covers THIS file in the macos job (see .github/workflows).
+describe.skipIf(process.platform !== "darwin")("blocked card cleanup over the real socket", () => {
   it("sends show with the ref, then clear with the same ref when the user decides", async () => {
     const daemon = await fakeDaemon();
     const { ctx, handlers } = fakeCtx();

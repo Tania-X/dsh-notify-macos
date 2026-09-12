@@ -33,6 +33,16 @@ jobs:
       # 放在这里可以保证它在 CI 上同样有效。
       - name: Run core invariants check (no XCTest)
         run: test/core-local-check.sh
+      # 平台相关的 host 集成测试（真 unix socket 驱动 apply()）：插件在非 macOS
+      # 会主动 early-return，所以这些用例只能在 macOS runner 上跑，ubuntu 的
+      # node job 里会被 skipIf 跳过 —— 覆盖缺口由这一步补上。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run macOS-only host integration tests (fake daemon over a real socket)
+        run: npx vitest run test/blocked-resolve-integration.test.js
 
   e2e:
     name: client e2e (playwright)
