@@ -226,26 +226,30 @@ final class NotificationCard: NSObject {
     /// Card clicks always deep-link to the card's session (blocked included:
     /// its pending approval/ask lives at that session's newest message). The
     /// `focusOnly` switch is retained solely for the socket `debug` command.
-    func performAction(focusOnly: Bool = false, turn turnOverride: Int? = nil) {
+    func performAction(focusOnly: Bool = false, turn turnOverride: Int? = nil) -> Bool {
         switch action {
         case "open-folder":
             if let path, !path.isEmpty {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
             }
+            return true
         case "open-web":
             if let url, let parsed = URL(string: url) {
                 NSWorkspace.shared.open(parsed)
             }
+            return true
         case "jump-web":
             // Jump the browser to this completion's own position: an aggregated
             // card gives every row its own anchor, so row N scrolls to the turn
             // THAT completion happened in (card-wide `turn` is the newest).
-            BrowserJumper.jump(
+            // The return value says whether the user could actually SEE it —
+            // the caller keeps the card/row when it could not.
+            return BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
                 turn: turnOverride ?? turn, focusOnly: focusOnly
             )
         default:
-            break
+            return true
         }
     }
 
@@ -533,8 +537,16 @@ final class CardView: NSView {
     /// Focus-only would leave the GUI on whichever session is active (the
     /// "newest" one) and miss the pending session entirely.
     private func jumpAndDismiss(_ card: NotificationCard) {
-        jump(card)
-        card.dismiss()
+        jump(card) { [weak card] visible in
+            guard let card else { return }
+            if visible {
+                card.dismiss()
+            } else {
+                // The user never saw a jump: keeping the card (instead of
+                // dismissing it) is what stops "clicked it, it just vanished".
+                dshLog("[cards] jump not visible; card kept so it can be retried\n")
+            }
+        }
     }
 
     /// Jump to one row's completion, then remove that row. When the last row
@@ -542,7 +554,18 @@ final class CardView: NSView {
     /// BLOCKED rows deep-link to their session like any other; removing the
     /// row just marks it handled.
     private func jumpAndRemoveRow(_ card: NotificationCard, row: Int) {
-        jump(card, turn: card.jumpTurn(forRow: row))
+        jump(card, turn: card.jumpTurn(forRow: row)) { [weak card] visible in
+            guard let card else { return }
+            guard visible else {
+                dshLog("[cards] jump not visible; row \(row) kept so it can be retried\n")
+                return
+            }
+            Self.removeRowAndRestack(card, row: row)
+        }
+    }
+
+    /// Remove one row and re-stack; the last removed row dismisses the card.
+    private static func removeRowAndRestack(_ card: NotificationCard, row: Int) {
         let removed = card.removeCompletion(index: row)
         if removed != nil {
             if card.completionCount == 0 {
@@ -558,14 +581,31 @@ final class CardView: NSView {
         }
     }
 
-    /// Dispatch the card action off the main thread when it drives a browser.
-    private func jump(_ card: NotificationCard, focusOnly: Bool = false, turn: Int? = nil) {
+    /// Dispatch the card action off the main thread when it drives a browser,
+    /// then report back ON THE MAIN THREAD whether the user should have seen
+    /// the jump (card removal keys off that answer).
+    private func jump(
+        _ card: NotificationCard, focusOnly: Bool = false, turn: Int? = nil,
+        completion: ((Bool) -> Void)? = nil
+    ) {
         let action = card.action
         let run = { card.performAction(focusOnly: focusOnly, turn: turn) }
+        guard completion != nil else {
+            if action == "jump-web" {
+                DispatchQueue.global(qos: .userInitiated).async { _ = run() }
+            } else {
+                _ = run()
+            }
+            return
+        }
         if action == "jump-web" {
-            DispatchQueue.global(qos: .userInitiated).async(execute: run)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let visible = run()
+                DispatchQueue.main.async { completion?(visible) }
+            }
         } else {
-            run()
+            let visible = run()
+            completion?(visible)
         }
     }
 }
@@ -703,7 +743,7 @@ enum BrowserJumper {
     /// they were using (e.g. a Markdown editor). The modern API (Big Sur+)
     /// without `.activateAllWindows` only activates + switches to the Space
     /// of the app's active window, leaving other Spaces' stacking untouched.
-    private static func activateApp(_ appName: String) -> Bool {
+    private static func activateApp(_ appName: String, allWindows: Bool = false) -> Bool {
         guard let channel = BrowserCatalog.channel(appName: appName),
               let app = NSWorkspace.shared.runningApplications.first(where: {
                   $0.bundleIdentifier == channel.bundleId
@@ -711,14 +751,60 @@ enum BrowserJumper {
         else { return false }
         // No options: modern (macOS 14+) activation — activates the app and
         // its active window without raising windows on other Spaces.
-        return app.activate(options: [])
+        // `allWindows` is the escalation used only when the weak activation
+        // did not actually bring the browser forward (see bringBrowserForward).
+        return app.activate(options: allWindows ? [.activateAllWindows] : [])
+    }
+
+    /// Bundle id of whatever app is frontmost right now.
+    private static func frontmostBundleId() -> String? {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    }
+
+    /// Bring the hosting browser forward and report whether the user can
+    /// actually see it.
+    ///
+    /// The weak activation (no `.activateAllWindows`) is tried first so other
+    /// Spaces' window stacking stays untouched. If the browser still is not
+    /// frontmost afterwards we escalate ONCE and log the whole trail: this is
+    /// the reported "clicked the card, it vanished, nothing jumped" case — the
+    /// AppleScript had navigated the tab, but the window never came into view.
+    private static func bringBrowserForward(_ appName: String) -> Bool {
+        guard let channel = BrowserCatalog.channel(appName: appName) else { return false }
+        let before = frontmostBundleId()
+        let weakResult = activateApp(appName)
+        var frontmost = frontmostBundleId()
+        var escalated = false
+        if JumpPolicy.shouldEscalateActivation(browserIsFrontmost: frontmost == channel.bundleId) {
+            escalated = true
+            dshLog(
+                "[activate] \(appName) not frontmost after weak activate"
+                + " (returned=\(weakResult) frontmost=\(frontmost ?? "nil") before=\(before ?? "nil"))"
+                + "; escalating to activateAllWindows\n"
+            )
+            _ = activateApp(appName, allWindows: true)
+            let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
+            while Date() < deadline {
+                frontmost = frontmostBundleId()
+                if frontmost == channel.bundleId { break }
+                Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
+            }
+        }
+        let visible = frontmost == channel.bundleId
+        dshLog(
+            "[activate] \(appName) frontmost=\(frontmost ?? "nil") visible=\(visible)"
+            + " escalated=\(escalated) before=\(before ?? "nil")\n"
+        )
+        return visible
     }
 
     /// Focus the browser window/tab already showing `guiUrl` (no URL change —
     /// used for a card that is waiting on the user's approval/answer already
     /// on screen). Raises that tab's window inside the app, then activates the
     /// app through the modern API (no cross-Space window raise).
-    private static func focusHostingTab(appName: String, guiUrl: String) -> ProbeOutcome {
+    private static func focusHostingTab(
+        appName: String, guiUrl: String
+    ) -> (outcome: ProbeOutcome, visible: Bool) {
         let script: String
         if appName == "Safari" {
             script = """
@@ -734,8 +820,10 @@ enum BrowserJumper {
                 if targetTab is not missing value then exit repeat
               end repeat
               if targetTab is not missing value then
-                set current tab of (first window whose tabs contains targetTab) to targetTab
-                set index of (first window whose tabs contains targetTab) to 1
+                set hostWindow to (first window whose tabs contains targetTab)
+                if miniaturized of hostWindow then set miniaturized of hostWindow to false
+                set current tab of hostWindow to targetTab
+                set index of hostWindow to 1
               else
                 error "dsh-no-tab"
               end if
@@ -756,8 +844,12 @@ enum BrowserJumper {
                 if targetTab is not missing value then exit repeat
               end repeat
               if targetTab is not missing value then
-                set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
-                set index of (first window whose tabs contains targetTab) to 1
+                set hostWindow to (first window whose tabs contains targetTab)
+                try
+                  if miniaturized of hostWindow then set miniaturized of hostWindow to false
+                end try
+                set active tab index of hostWindow to (index of targetTab)
+                set index of hostWindow to 1
               else
                 error "dsh-no-tab"
               end if
@@ -765,11 +857,12 @@ enum BrowserJumper {
             """
         }
         let outcome = classify(runOSAScript(script, label: "focus-\(appName)"))
+        var visible = false
         if outcome == .hosted {
             dshLog("[focus] \(appName) tab raised; modern-activating\n")
-            _ = activateApp(appName)
+            visible = bringBrowserForward(appName)
         }
-        return outcome
+        return (outcome, visible)
     }
 
     /// Find and navigate the tab that already shows `guiUrl` to `targetURL`.
@@ -781,7 +874,7 @@ enum BrowserJumper {
     /// activated through the modern API (no cross-Space window raise).
     private static func navigateHostingTab(
         appName: String, guiUrl: String, targetURL: String
-    ) -> ProbeOutcome {
+    ) -> (outcome: ProbeOutcome, visible: Bool) {
         let script: String
         if appName == "Safari" {
             // Safari can `set URL` on the specific tab directly.
@@ -798,9 +891,11 @@ enum BrowserJumper {
                 if targetTab is not missing value then exit repeat
               end repeat
               if targetTab is not missing value then
+                set hostWindow to (first window whose tabs contains targetTab)
+                if miniaturized of hostWindow then set miniaturized of hostWindow to false
                 set URL of targetTab to \(asString(targetURL))
-                set current tab of (first window whose tabs contains targetTab) to targetTab
-                set index of (first window whose tabs contains targetTab) to 1
+                set current tab of hostWindow to targetTab
+                set index of hostWindow to 1
               else
                 error "dsh-no-tab"
               end if
@@ -823,8 +918,12 @@ enum BrowserJumper {
                 if targetTab is not missing value then exit repeat
               end repeat
               if targetTab is missing value then error "dsh-no-tab"
-              set active tab index of (first window whose tabs contains targetTab) to (index of targetTab)
-              set index of (first window whose tabs contains targetTab) to 1
+              set hostWindow to (first window whose tabs contains targetTab)
+              try
+                if miniaturized of hostWindow then set miniaturized of hostWindow to false
+              end try
+              set active tab index of hostWindow to (index of targetTab)
+              set index of hostWindow to 1
               try
                 execute targetTab javascript \(asString("location.href = \(asString(targetURL));"))
               on error
@@ -834,11 +933,12 @@ enum BrowserJumper {
             """
         }
         let outcome = classify(runOSAScript(script, label: "navigate-\(appName)"))
+        var visible = false
         if outcome == .hosted {
             dshLog("[navigate] \(appName) tab updated; modern-activating\n")
-            _ = activateApp(appName)
+            visible = bringBrowserForward(appName)
         }
-        return outcome
+        return (outcome, visible)
     }
 
     /// Jump: point the hosting browser tab at the hashed GUI URL so the
@@ -846,15 +946,16 @@ enum BrowserJumper {
     /// browser hosts the GUI yet. When `focusOnly` is true (a card waiting on
     /// the user, e.g. approval/answer) it activates the hosting tab without
     /// navigating — the pending UI is already there.
+    @discardableResult
     static func jump(
         url: String?, sessionId: String?, sessionTitle: String?, turn: Int? = nil,
         focusOnly: Bool = false
-    ) {
+    ) -> Bool {
         dshLog("[jump] start focusOnly=\(focusOnly) url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
         let guiUrl = (url?.isEmpty == false) ? url! : guiBaseUrl
         guard let sessionId, !sessionId.isEmpty else {
             if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
-            return
+            return true
         }
         let base = (url?.isEmpty == false) ? url! : guiBaseUrl
         let target = JumpLink.url(base: base, sessionId: sessionId, turn: turn)
@@ -886,14 +987,26 @@ enum BrowserJumper {
             var sawTimeout = false
             for app in order {
                 dshLog("[jump] pass \(pass) probing \(app)\n")
-                let outcome: ProbeOutcome = focusOnly
+                let probe = focusOnly
                     ? focusHostingTab(appName: app, guiUrl: guiUrl)
                     : navigateHostingTab(appName: app, guiUrl: guiUrl, targetURL: target)
-                switch outcome {
+                switch probe.outcome {
                 case .hosted:
                     lastHostingBrowser = app
-                    dshLog("[jump] \(focusOnly ? "focused" : "navigated") tab in \(app)\n")
-                    return
+                    let visible = JumpPolicy.isVisibleToUser(
+                        navigated: true, browserIsFrontmost: probe.visible
+                    )
+                    dshLog(
+                        "[jump] \(focusOnly ? "focused" : "navigated") tab in \(app)"
+                        + " (visible=\(visible))\n"
+                    )
+                    if !visible {
+                        dshLog(
+                            "[jump] tab updated but \(app) never came forward —"
+                            + " the user did not see the jump; card kept for a retry\n"
+                        )
+                    }
+                    return visible
                 case .denied:
                     sawDenied = true   // transient? try the whole pass again
                     sawDeniedAnyPass = true
@@ -926,10 +1039,11 @@ enum BrowserJumper {
             dshLog("[jump] automation denied for a running browser; NOT opening a new tab\n")
             dshLog("[jump] hint: restart the daemon outside a sandbox (or let the plugin spawn it) and re-grant Automation\n")
             if let first = order.first {
-                _ = activateApp(first)
-                dshLog("[jump] activated \(first) instead\n")
+                let visible = bringBrowserForward(first)
+                dshLog("[jump] surfaced \(first) instead (visible=\(visible))\n")
+                return visible
             }
-            return
+            return false
         }
 
         // Clean pass: browsers were reachable but no tab hosts the GUI, i.e. the
@@ -941,9 +1055,26 @@ enum BrowserJumper {
         do {
             try process.run()
             process.waitUntilExit()
-            dshLog("[jump] open exit=\(process.terminationStatus)\n")
+            dshLog(
+                "[jump] open exit=\(process.terminationStatus)"
+                + " (frontmost=\(frontmostBundleId() ?? "nil"))\n"
+            )
+            // `open` goes through LaunchServices, which activates the browser
+            // itself: give it a moment and report what the user sees.
+            let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
+            while Date() < deadline {
+                if let front = frontmostBundleId(),
+                   BrowserCatalog.families.contains(where: { family in
+                       family.channels.contains { $0.bundleId == front }
+                   }) {
+                    return true
+                }
+                Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
+            }
+            return false
         } catch {
             dshLog("[jump] open failed: \(error)\n")
+            return false
         }
     }
 }
@@ -1283,11 +1414,13 @@ final class SocketServer {
             let sessionTitle = object["sessionTitle"] as? String
             let focusOnly = (object["focusOnly"] as? Bool) ?? false
             let turn = object["turn"] as? Int
-            BrowserJumper.jump(
+            let visible = BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
                 turn: turn, focusOnly: focusOnly
             )
-            reply("{\"ok\":true}\n")
+            // `visible` tells the caller whether the browser actually came
+            // forward — the same signal the card uses to decide keep-vs-dismiss.
+            reply("{\"ok\":true,\"visible\":\(visible)}\n")
         default:
             break
         }
