@@ -8,3 +8,6 @@ node_modules/
 .pw-browsers/
 test-results/
 playwright-report/
+
+# npm pack 产物（发布时上传到 Release，不入库）
+*.tgz
