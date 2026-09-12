@@ -1181,11 +1181,11 @@ final class CardStack {
     /// assert the effect without reading the disk snapshot.
     func clear(sessionId: String, ref: String) -> String {
         guard let card = cards.first(where: { $0.sessionId == sessionId }) else {
-            dshLog("[clear] no card for session \(sessionId); nothing to do\n")
+            dshLog("[clear] no card for session \(sessionId) ref=\(ref); nothing to do\n")
             return "{\"ok\":true,\"removed\":0,\"reason\":\"no-card\"}"
         }
         guard card.removeCompletion(ref: ref) != nil else {
-            dshLog("[clear] card has no row with ref=\(ref); nothing to do\n")
+            dshLog("[clear] card for \(sessionId) has no row with ref=\(ref); nothing to do\n")
             return "{\"ok\":true,\"removed\":0,\"reason\":\"no-row\",\"remaining\":\(card.completionCount)}"
         }
         let remaining = card.completionCount
@@ -1211,6 +1211,15 @@ final class CardStack {
     /// Show a completion. If a card for the same session already exists,
     /// merge into it (append entry, auto-expand optional); else create one.
     func show(request: ShowRequest) {
+        // One line per delivered frame: makes the host→daemon contract visible
+        // in the log (which kind, which session, and the blocked-row key that
+        // lets a later `clear` find exactly this row).
+        dshLog(
+            "[show] kind=\(request.kind ?? "completed")"
+            + " session=\(request.sessionId ?? "nil")"
+            + " turn=\(request.turn.map(String.init) ?? "nil")"
+            + " ref=\(request.ref ?? "nil")\n"
+        )
         let sessionTitle: String
         if let st = request.sessionTitle, !st.isEmpty {
             sessionTitle = st
