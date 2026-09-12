@@ -93,6 +93,13 @@ final class NotificationCard: NSObject {
     var onToggleExpanded: ((NotificationCard) -> Void)?
     private var removing = false
 
+    /// True while the card is animating out. It stays in the stack until the
+    /// animation ends, so anything running in that window (merging a new
+    /// completion, re-stacking, persisting) must treat it as already gone:
+    /// otherwise a notification is drawn on a window that is about to
+    /// disappear, or a rowless card gets written to the snapshot.
+    var isDismissing: Bool { removing }
+
     /// Card dimensions.
     static let width: CGFloat = 360
     static let headerHeight: CGFloat = 56
@@ -1104,6 +1111,12 @@ final class CardStack {
                 dshLog("[cards] skipping expired card \(sc.sessionTitle)\n")
                 continue
             }
+            guard !sc.entries.isEmpty else {
+                // A row-less card has nothing to show or click; older builds
+                // could persist one when a relayout happened mid-dismiss.
+                dshLog("[cards] skipping empty card \(sc.sessionTitle)\n")
+                continue
+            }
             let card = NotificationCard(
                 sessionId: sc.sessionId,
                 sessionTitle: sc.sessionTitle,
@@ -1150,12 +1163,17 @@ final class CardStack {
     /// Persist the current stack (no-op while restoring or without a store).
     private func persist() {
         guard let store, !restoring else { return }
-        guard !cards.isEmpty else {
-            // Empty stack: remove the file instead of leaving an empty snapshot.
+        // A card that is dismissing is already gone as far as the user is
+        // concerned; it is only still in `cards` so the animation can finish.
+        // Persisting it recorded a rowless card that came back as a weird empty
+        // card after a restart. Same reasoning as relayout skipping it.
+        let live = cards.filter { !$0.isDismissing }
+        guard !live.isEmpty else {
+            // Nothing worth keeping: remove the file instead of an empty snapshot.
             store.clear()
             return
         }
-        let snapshot = CardStackSnapshot(cards: cards.map { card in
+        let snapshot = CardStackSnapshot(cards: live.map { card in
             SnapshotCard(
                 sessionId: card.sessionId,
                 sessionTitle: card.sessionTitle,
@@ -1233,9 +1251,11 @@ final class CardStack {
         let detail = request.detail
         let action = request.action ?? "jump-web"
 
-        // Merge into an existing card for the same session.
+        // Merge into an existing card for the same session — but never into one
+        // that is already flying out: its window is mid-dismiss and will be gone
+        // in a moment, so the merge would silently swallow the notification.
         if let sessionId = request.sessionId, !sessionId.isEmpty,
-           let existing = cards.first(where: { $0.sessionId == sessionId }) {
+           let existing = cards.first(where: { $0.sessionId == sessionId && !$0.isDismissing }) {
             existing.addCompletion(
                 message: message, kind: kind, detail: detail, turn: request.turn, ref: request.ref
             )
@@ -1279,6 +1299,11 @@ final class CardStack {
         guard let screen = NSScreen.main?.visibleFrame else { return }
         var y = screen.maxY - margin
         for card in cards {
+            // A card that is dismissing must be left alone: it is still in the
+            // stack (it only leaves when the animation finishes), and re-stacking
+            // it here would yank it back to the top-right corner mid-flight —
+            // the user would see it move out, snap back, then disappear.
+            guard !card.isDismissing else { continue }
             let frame = card.window.frame
             let targetOrigin = NSPoint(x: screen.maxX - frame.width - margin, y: y - frame.height)
             if animated {
