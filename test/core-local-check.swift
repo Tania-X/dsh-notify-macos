@@ -95,20 +95,6 @@ do {
     check(false, "legacy fixture setup threw: \(error)")
 }
 
-// --- 点击结果三态：只有 unconfirmed 才保留卡片 ---
-check(JumpPolicy.shouldDismissCard(after: .visible), "visible outcome dismisses the card")
-check(JumpPolicy.shouldDismissCard(after: .notApplicable), "notApplicable (no position jump) dismisses")
-check(!JumpPolicy.shouldDismissCard(after: .unconfirmed), "unconfirmed keeps the card for a retry")
-check(
-    JumpPolicy.isVisibleToUser(navigated: true, browserIsFrontmost: false) == false,
-    "navigated but browser not frontmost is NOT visible"
-)
-check(
-    JumpPolicy.shouldEscalateActivation(browserIsFrontmost: false)
-        && !JumpPolicy.shouldEscalateActivation(browserIsFrontmost: true),
-    "activation escalates only when the browser did not come forward"
-)
-
 // --- 行删除按身份：并发点击下不会删错行 ---
 let rowModel = CardModel()
 let ta = Date(timeIntervalSince1970: 1_700_000_000)

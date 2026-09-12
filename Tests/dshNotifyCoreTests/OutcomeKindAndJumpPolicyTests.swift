@@ -35,35 +35,9 @@ final class JumpPolicyTests: XCTestCase {
 
     // MARK: Activation visibility (the "card vanished, nothing jumped" bug)
 
-    func testEscalatesActivationOnlyWhenBrowserDidNotComeForward() {
-        XCTAssertTrue(JumpPolicy.shouldEscalateActivation(browserIsFrontmost: false))
-        XCTAssertFalse(JumpPolicy.shouldEscalateActivation(browserIsFrontmost: true))
-    }
 
-    func testJumpIsVisibleOnlyWhenNavigatedAndBrowserIsFrontmost() {
-        XCTAssertTrue(JumpPolicy.isVisibleToUser(navigated: true, browserIsFrontmost: true))
-        XCTAssertFalse(JumpPolicy.isVisibleToUser(navigated: true, browserIsFrontmost: false))
-        XCTAssertFalse(JumpPolicy.isVisibleToUser(navigated: false, browserIsFrontmost: true))
-        XCTAssertFalse(JumpPolicy.isVisibleToUser(navigated: false, browserIsFrontmost: false))
-    }
 
-    func testActivationWaitBudgetIsBounded() {
-        // A clicked card must not hang the UI thread waiting for the browser.
-        XCTAssertGreaterThan(JumpPolicy.activationSettleSeconds, 0)
-        XCTAssertLessThanOrEqual(JumpPolicy.activationSettleSeconds, 2)
-        XCTAssertGreaterThan(JumpPolicy.activationPollSeconds, 0)
-        XCTAssertLessThan(JumpPolicy.activationPollSeconds, JumpPolicy.activationSettleSeconds)
-    }
 
-    func testOnlyUnconfirmedKeepsTheCard() {
-        // `visible` is done; `notApplicable` was never a position jump; only
-        // `unconfirmed` keeps the card so the click can be retried. (A bare
-        // Bool here previously let "no session id"/"open-folder" report success
-        // without ever checking anything — AI review, severity 4.)
-        XCTAssertTrue(JumpPolicy.shouldDismissCard(after: .visible))
-        XCTAssertTrue(JumpPolicy.shouldDismissCard(after: .notApplicable))
-        XCTAssertFalse(JumpPolicy.shouldDismissCard(after: .unconfirmed))
-    }
 
     func testShouldRetryOnlyWhenDeniedAndPassesRemain() {
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 1, sawDenied: true))

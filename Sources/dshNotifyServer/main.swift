@@ -243,45 +243,38 @@ final class NotificationCard: NSObject {
     /// Card clicks always deep-link to the card's session (blocked included:
     /// its pending approval/ask lives at that session's newest message). The
     /// `focusOnly` switch is retained solely for the socket `debug` command.
-    func performAction(
-        focusOnly: Bool = false, turn turnOverride: Int? = nil
-    ) -> JumpPolicy.JumpOutcome {
+    /// Run the click action. The return value is the HONEST, checkable signal:
+    /// "was the command handed off" — nothing more. We deliberately do not try
+    /// to judge whether the user *saw* the result: that is not knowable from
+    /// here (every heuristic we tried — app frontmost, window on screen — was
+    /// defeatable), and the guessing is what made this feature complicated.
+    /// Handing the jump to the browser plus raising its window is the whole job.
+    func performAction(focusOnly: Bool = false, turn turnOverride: Int? = nil) -> Bool {
         switch action {
         case "open-folder":
             guard let path, !path.isEmpty else {
-                // Degenerate payload: nothing to reveal, so there is also
-                // nothing that could be invisible to the user. Reporting
-                // `unconfirmed` here would leave a card that can never be
-                // clicked away (only a drag would clear it).
-                dshLog("[action] open-folder without a path; dismissing as no-op\n")
-                return .notApplicable
+                dshLog("[action] open-folder without a path; treating as handled no-op\n")
+                return true
             }
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-            // Revealing in Finder is only *visible* if Finder came forward;
-            // otherwise report unconfirmed so the card is kept for a retry
-            // instead of vanishing over a no-op (AI review, severity 4).
-            return BrowserJumper.confirmFrontmost(bundleId: "com.apple.finder")
+            return true
         case "open-web":
             guard let url, let parsed = URL(string: url) else {
-                dshLog("[action] open-web without a usable URL; dismissing as no-op\n")
-                return .notApplicable
+                dshLog("[action] open-web without a usable URL; treating as handled no-op\n")
+                return true
             }
             NSWorkspace.shared.open(parsed)
-            return BrowserJumper.confirmFrontmostBrowser()
+            return true
         case "jump-web":
             // Jump the browser to this completion's own position: an aggregated
             // card gives every row its own anchor, so row N scrolls to the turn
             // THAT completion happened in (card-wide `turn` is the newest).
-            // The return value says whether the user could actually SEE it —
-            // the caller keeps the card/row when it could not.
             return BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
                 turn: turnOverride ?? turn, focusOnly: focusOnly
             )
         default:
-            // No browser/UX action at all: nothing to confirm, dismissing is
-            // the (unchanged) expected behaviour.
-            return .notApplicable
+            return true
         }
     }
 
@@ -569,14 +562,14 @@ final class CardView: NSView {
     /// Focus-only would leave the GUI on whichever session is active (the
     /// "newest" one) and miss the pending session entirely.
     private func jumpAndDismiss(_ card: NotificationCard) {
-        jump(card) { [weak card] outcome in
+        jump(card) { [weak card] driven in
             guard let card else { return }
-            if JumpPolicy.shouldDismissCard(after: outcome) {
+            if driven {
                 card.dismiss()
             } else {
-                // The user never saw a jump: keeping the card (instead of
+                // The jump never reached a browser: keeping the card (instead of
                 // dismissing it) is what stops "clicked it, it just vanished".
-                dshLog("[cards] jump not visible; card kept so it can be retried\n")
+                dshLog("[cards] jump not delivered; card kept so it can be retried\n")
             }
         }
     }
@@ -590,10 +583,10 @@ final class CardView: NSView {
         // async browser jump, by which time another click may already have
         // removed a row and shifted the indices.
         guard let clicked = card.entry(atRow: row) else { return }
-        jump(card, turn: card.jumpTurn(forRow: row)) { [weak card] outcome in
+        jump(card, turn: card.jumpTurn(forRow: row)) { [weak card] driven in
             guard let card else { return }
-            guard JumpPolicy.shouldDismissCard(after: outcome) else {
-                dshLog("[cards] jump not visible; row \(row) kept so it can be retried\n")
+            guard driven else {
+                dshLog("[cards] jump not delivered; row \(row) kept so it can be retried\n")
                 return
             }
             Self.removeRowAndRestack(card, matching: clicked)
@@ -623,17 +616,12 @@ final class CardView: NSView {
     }
 
     /// Dispatch the card action off the main thread, then report back ON THE
-    /// MAIN THREAD what the user should have seen (card removal keys off that
-    /// answer).
-    ///
-    /// EVERY action whose outcome is reported goes to a background queue — not
-    /// just `jump-web`: confirming "did the app come forward" polls with a
-    /// bounded sleep, and running that on the main thread (which is where the
-    /// click's mouseUp handler lives) hitches the card UI for up to
-    /// `activationSettleSeconds` (AI review round 2, severity 4).
+    /// MAIN THREAD whether the command was handed off (card removal keys off
+    /// that answer). Browser driving and Apple Events can block for seconds, so
+    /// it never runs on the main thread (where the click's mouseUp handler is).
     private func jump(
         _ card: NotificationCard, focusOnly: Bool = false, turn: Int? = nil,
-        completion: ((JumpPolicy.JumpOutcome) -> Void)? = nil
+        completion: ((Bool) -> Void)? = nil
     ) {
         let action = card.action
         let run = { card.performAction(focusOnly: focusOnly, turn: turn) }
@@ -774,76 +762,29 @@ enum BrowserJumper {
         return .denied
     }
 
-    /// Activate the browser app via the MODERN NSRunningApplication API so
-    /// only its frontmost window (the GUI one just raised) comes forward.
-    /// AppleScript `activate` uses legacy semantics that raise EVERY window
-    /// of the app on EVERY Space: when the user clicks a card from another
-    /// desktop, that desktop's browser window ends up stacked above the app
-    /// they were using (e.g. a Markdown editor). The modern API (Big Sur+)
-    /// without `.activateAllWindows` only activates + switches to the Space
-    /// of the app's active window, leaving other Spaces' stacking untouched.
-    private static func activateApp(_ appName: String, allWindows: Bool = false) -> Bool {
+    /// Activate the browser app (modern API). Only used to SURFACE the browser
+    /// when we are not allowed to drive it; the normal path raises the hosting
+    /// window from inside the AppleScript, which is the only way to pull a
+    /// window over from another Space.
+    private static func activateApp(_ appName: String) -> Bool {
         guard let channel = BrowserCatalog.channel(appName: appName),
               let app = NSWorkspace.shared.runningApplications.first(where: {
                   $0.bundleIdentifier == channel.bundleId
               })
         else { return false }
-        // No options: modern (macOS 14+) activation — activates the app and
-        // its active window without raising windows on other Spaces.
-        // `allWindows` is the escalation used only when the weak activation
-        // did not actually bring the browser forward (see bringBrowserForward).
-        return app.activate(options: allWindows ? [.activateAllWindows] : [])
+        return app.activate(options: [])
     }
 
-    /// Bundle id of whatever app is frontmost right now.
+    /// Bundle id of whatever app is frontmost right now (diagnostics only).
     private static func frontmostBundleId() -> String? {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-    }
-
-    /// Bring the hosting browser forward and report whether the user can
-    /// actually see it.
-    ///
-    /// The weak activation (no `.activateAllWindows`) is tried first so other
-    /// Spaces' window stacking stays untouched. If the browser still is not
-    /// frontmost afterwards we escalate ONCE and log the whole trail: this is
-    /// the reported "clicked the card, it vanished, nothing jumped" case — the
-    /// AppleScript had navigated the tab, but the window never came into view.
-    private static func bringBrowserForward(_ appName: String) -> Bool {
-        guard let channel = BrowserCatalog.channel(appName: appName) else { return false }
-        let before = frontmostBundleId()
-        let weakResult = activateApp(appName)
-        var frontmost = frontmostBundleId()
-        var escalated = false
-        if JumpPolicy.shouldEscalateActivation(browserIsFrontmost: frontmost == channel.bundleId) {
-            escalated = true
-            dshLog(
-                "[activate] \(appName) not frontmost after weak activate"
-                + " (returned=\(weakResult) frontmost=\(frontmost ?? "nil") before=\(before ?? "nil"))"
-                + "; escalating to activateAllWindows\n"
-            )
-            _ = activateApp(appName, allWindows: true)
-            let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
-            while Date() < deadline {
-                frontmost = frontmostBundleId()
-                if frontmost == channel.bundleId { break }
-                Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
-            }
-        }
-        let visible = frontmost == channel.bundleId
-        dshLog(
-            "[activate] \(appName) frontmost=\(frontmost ?? "nil") visible=\(visible)"
-            + " escalated=\(escalated) before=\(before ?? "nil")\n"
-        )
-        return visible
     }
 
     /// Focus the browser window/tab already showing `guiUrl` (no URL change —
     /// used for a card that is waiting on the user's approval/answer already
     /// on screen). Raises that tab's window inside the app, then activates the
     /// app through the modern API (no cross-Space window raise).
-    private static func focusHostingTab(
-        appName: String, guiUrl: String
-    ) -> (outcome: ProbeOutcome, visible: Bool) {
+    private static func focusHostingTab(appName: String, guiUrl: String) -> ProbeOutcome {
         let script: String
         if appName == "Safari" {
             script = """
@@ -863,6 +804,7 @@ enum BrowserJumper {
                 if miniaturized of hostWindow then set miniaturized of hostWindow to false
                 set current tab of hostWindow to targetTab
                 set index of hostWindow to 1
+                activate
               else
                 error "dsh-no-tab"
               end if
@@ -889,6 +831,7 @@ enum BrowserJumper {
                 end try
                 set active tab index of hostWindow to (index of targetTab)
                 set index of hostWindow to 1
+                activate
               else
                 error "dsh-no-tab"
               end if
@@ -896,12 +839,10 @@ enum BrowserJumper {
             """
         }
         let outcome = classify(runOSAScript(script, label: "focus-\(appName)"))
-        var visible = false
         if outcome == .hosted {
-            dshLog("[focus] \(appName) tab raised; modern-activating\n")
-            visible = bringBrowserForward(appName)
+            dshLog("[focus] \(appName) hosting window raised (AppleScript activate)\n")
         }
-        return (outcome, visible)
+        return outcome
     }
 
     /// Find and navigate the tab that already shows `guiUrl` to `targetURL`.
@@ -913,7 +854,7 @@ enum BrowserJumper {
     /// activated through the modern API (no cross-Space window raise).
     private static func navigateHostingTab(
         appName: String, guiUrl: String, targetURL: String
-    ) -> (outcome: ProbeOutcome, visible: Bool) {
+    ) -> ProbeOutcome {
         let script: String
         if appName == "Safari" {
             // Safari can `set URL` on the specific tab directly.
@@ -935,6 +876,7 @@ enum BrowserJumper {
                 set URL of targetTab to \(asString(targetURL))
                 set current tab of hostWindow to targetTab
                 set index of hostWindow to 1
+                activate
               else
                 error "dsh-no-tab"
               end if
@@ -963,6 +905,7 @@ enum BrowserJumper {
               end try
               set active tab index of hostWindow to (index of targetTab)
               set index of hostWindow to 1
+              activate
               try
                 execute targetTab javascript \(asString("location.href = \(asString(targetURL));"))
               on error
@@ -972,12 +915,10 @@ enum BrowserJumper {
             """
         }
         let outcome = classify(runOSAScript(script, label: "navigate-\(appName)"))
-        var visible = false
         if outcome == .hosted {
-            dshLog("[navigate] \(appName) tab updated; modern-activating\n")
-            visible = bringBrowserForward(appName)
+            dshLog("[navigate] \(appName) tab updated; hosting window raised\n")
         }
-        return (outcome, visible)
+        return outcome
     }
 
     /// Jump: point the hosting browser tab at the hashed GUI URL so the
@@ -985,11 +926,14 @@ enum BrowserJumper {
     /// browser hosts the GUI yet. When `focusOnly` is true (a card waiting on
     /// the user, e.g. approval/answer) it activates the hosting tab without
     /// navigating — the pending UI is already there.
+    /// Hand the deep link to the browser hosting the GUI. Returns whether the
+    /// command was DELIVERED — deliberately not a claim about what the user saw
+    /// (see `performAction`).
     @discardableResult
     static func jump(
         url: String?, sessionId: String?, sessionTitle: String?, turn: Int? = nil,
         focusOnly: Bool = false
-    ) -> JumpPolicy.JumpOutcome {
+    ) -> Bool {
         dshLog("[jump] start focusOnly=\(focusOnly) url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
         let guiUrl = (url?.isEmpty == false) ? url! : guiBaseUrl
         guard let sessionId, !sessionId.isEmpty else {
@@ -998,7 +942,7 @@ enum BrowserJumper {
             // what actually happened instead of claiming a visible jump.
             if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
             dshLog("[jump] no sessionId: opened \(guiUrl) (not a position jump)\n")
-            return .notApplicable
+            return true
         }
         let base = (url?.isEmpty == false) ? url! : guiBaseUrl
         let target = JumpLink.url(base: base, sessionId: sessionId, turn: turn)
@@ -1030,27 +974,14 @@ enum BrowserJumper {
             var sawTimeout = false
             for app in order {
                 dshLog("[jump] pass \(pass) probing \(app)\n")
-                let probe = focusOnly
+                let outcome: ProbeOutcome = focusOnly
                     ? focusHostingTab(appName: app, guiUrl: guiUrl)
                     : navigateHostingTab(appName: app, guiUrl: guiUrl, targetURL: target)
-                switch probe.outcome {
+                switch outcome {
                 case .hosted:
                     lastHostingBrowser = app
-                    let visible = JumpPolicy.isVisibleToUser(
-                        navigated: true, browserIsFrontmost: probe.visible
-                    )
-                    dshLog(
-                        "[jump] \(focusOnly ? "focused" : "navigated") tab in \(app)"
-                        + " (visible=\(visible))\n"
-                    )
-                    if !visible {
-                        dshLog(
-                            "[jump] tab updated but \(app) never came forward —"
-                            + " the user did not see the jump; card kept for a retry\n"
-                        )
-                        return .unconfirmed
-                    }
-                    return .visible
+                    dshLog("[jump] \(focusOnly ? "focused" : "navigated") tab in \(app) (delivered)\n")
+                    return true
                 case .denied:
                     sawDenied = true   // transient? try the whole pass again
                     sawDeniedAnyPass = true
@@ -1083,11 +1014,10 @@ enum BrowserJumper {
             dshLog("[jump] automation denied for a running browser; NOT opening a new tab\n")
             dshLog("[jump] hint: restart the daemon outside a sandbox (or let the plugin spawn it) and re-grant Automation\n")
             if let first = order.first {
-                let visible = bringBrowserForward(first)
-                dshLog("[jump] surfaced \(first) instead (visible=\(visible))\n")
-                return visible ? .visible : .unconfirmed
+                dshLog("[jump] surfaced \(first) instead (undrivable)\n")
+                _ = activateApp(first)
             }
-            return .unconfirmed
+            return false
         }
 
         // Clean pass: browsers were reachable but no tab hosts the GUI, i.e. the
@@ -1103,50 +1033,13 @@ enum BrowserJumper {
                 "[jump] open exit=\(process.terminationStatus)"
                 + " (frontmost=\(frontmostBundleId() ?? "nil"))\n"
             )
-            // `open` goes through LaunchServices, which activates the browser
-            // itself: give it a moment and report what the user sees.
-            let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
-            while Date() < deadline {
-                if isFrontmostABrowser() { return .visible }
-                Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
-            }
-            return .unconfirmed
+            // LaunchServices opens+activates the browser itself; the exit status
+            // is the only thing we can honestly report here.
+            return process.terminationStatus == 0
         } catch {
             dshLog("[jump] open failed: \(error)\n")
-            return .unconfirmed
+            return false
         }
-    }
-
-    /// Whether a catalogued browser is frontmost right now.
-    static func isFrontmostABrowser() -> Bool {
-        guard let front = frontmostBundleId() else { return false }
-        return BrowserCatalog.families.contains { family in
-            family.channels.contains { $0.bundleId == front }
-        }
-    }
-
-    /// Confirm an app came to the front, polling for the activation to settle.
-    /// Used by the non-jump actions (`open-folder`) so they report visibility
-    /// instead of an unconditional success.
-    static func confirmFrontmost(bundleId: String) -> JumpPolicy.JumpOutcome {
-        let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
-        while Date() < deadline {
-            if frontmostBundleId() == bundleId { return .visible }
-            Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
-        }
-        dshLog("[confirm] \(bundleId) never came forward; reporting unconfirmed\n")
-        return .unconfirmed
-    }
-
-    /// Same, for "a browser came forward" (used by the plain-URL open action).
-    static func confirmFrontmostBrowser() -> JumpPolicy.JumpOutcome {
-        let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
-        while Date() < deadline {
-            if isFrontmostABrowser() { return .visible }
-            Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
-        }
-        dshLog("[confirm] no browser came forward; reporting unconfirmed\n")
-        return .unconfirmed
     }
 }
 
@@ -1485,28 +1378,13 @@ final class SocketServer {
             let sessionTitle = object["sessionTitle"] as? String
             let focusOnly = (object["focusOnly"] as? Bool) ?? false
             let turn = object["turn"] as? Int
-            let outcome = BrowserJumper.jump(
+            let driven = BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
                 turn: turn, focusOnly: focusOnly
             )
-            // Mirrors the card-click conclusion for the jump path: `visible` =
-            // the user should have seen it, so the card is dropped;
-            // `unconfirmed` keeps the card for a retry.
-            //
-            // Scope: this exercises `jump-web` only. `open-folder`/`open-web`
-            // cards additionally confirm Finder/any-browser came forward in
-            // `performAction`, so their real click can report `unconfirmed`
-            // where this diagnostic would not.
-            let label: String
-            switch outcome {
-            case .visible: label = "visible"
-            case .unconfirmed: label = "unconfirmed"
-            case .notApplicable: label = "notApplicable"
-            }
-            reply(
-                "{\"ok\":true,\"outcome\":\"\(label)\""
-                + ",\"visible\":\(outcome == .visible)}\n"
-            )
+            // Same signal a card click uses: was the command delivered to a
+            // browser (the card is dropped only then).
+            reply("{\"ok\":true,\"driven\":\(driven)}\n")
         default:
             break
         }

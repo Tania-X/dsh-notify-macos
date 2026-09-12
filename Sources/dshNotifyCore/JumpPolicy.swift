@@ -129,56 +129,6 @@ public enum JumpPolicy {
     public static func shouldOpenFallback(sawDenied: Bool) -> Bool {
         !sawDenied
     }
-
-    /// How long (seconds) to keep polling for "the browser actually came
-    /// forward" after activation before declaring the jump unconfirmed.
-    public static let activationSettleSeconds: Double = 0.75
-    /// Polling step while waiting for the browser to become frontmost.
-    public static let activationPollSeconds: Double = 0.05
-
-    /// Whether to escalate from weak activation (keeps other Spaces' stacking
-    /// intact) to `activateAllWindows`. A weak activation that did NOT make the
-    /// browser frontmost means the hosting window never came into view — the
-    /// reported "clicked the card, it vanished, nothing jumped" case — so
-    /// raising the app's windows is worth the stacking trade-off.
-    public static func shouldEscalateActivation(browserIsFrontmost: Bool) -> Bool {
-        !browserIsFrontmost
-    }
-
-    /// Whether the user should actually SEE the jump: the tab was navigated AND
-    /// its browser is frontmost (it may already have been frontmost — then no
-    /// activation was needed and the tab switch is visible immediately).
-    ///
-    /// Callers keep the card/row when this is false, instead of dismissing it
-    /// over a jump the user cannot see.
-    public static func isVisibleToUser(navigated: Bool, browserIsFrontmost: Bool) -> Bool {
-        navigated && browserIsFrontmost
-    }
-
-    /// What a click's action achieved, as far as the daemon can tell.
-    ///
-    /// The distinction matters because the CALLER decides whether to drop the
-    /// card: reporting a bare `Bool` invited "true" on paths that never checked
-    /// anything (a card with no session id, `open-folder`/`open-web`), which
-    /// dismissed the card over an action the user may never have seen — the very
-    /// false-success this feature exists to prevent (AI review, severity 4).
-    public enum JumpOutcome: Equatable {
-        /// The action ran AND the user should see it (browser frontmost/raised).
-        case visible
-        /// Something was attempted but visibility could not be confirmed —
-        /// keep the card/row so the click can be retried.
-        case unconfirmed
-        /// No confirmable jump is involved (folder reveal, plain URL open with
-        /// no session to jump to): dismissing is the expected behaviour.
-        case notApplicable
-    }
-
-    /// Whether the card/row may be dropped after an action with this outcome.
-    /// Only `unconfirmed` keeps it — `visible` is done, `notApplicable` was
-    /// never about a jump.
-    public static func shouldDismissCard(after outcome: JumpOutcome) -> Bool {
-        outcome != .unconfirmed
-    }
 }
 
 /// Deep-link construction for a card click (pure so it can be unit-tested).
