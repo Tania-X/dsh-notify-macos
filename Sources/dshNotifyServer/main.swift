@@ -616,30 +616,29 @@ final class CardView: NSView {
         }
     }
 
-    /// Dispatch the card action off the main thread when it drives a browser,
-    /// then report back ON THE MAIN THREAD whether the user should have seen
-    /// the jump (card removal keys off that answer).
+    /// Dispatch the card action off the main thread, then report back ON THE
+    /// MAIN THREAD what the user should have seen (card removal keys off that
+    /// answer).
+    ///
+    /// EVERY action whose outcome is reported goes to a background queue — not
+    /// just `jump-web`: confirming "did the app come forward" polls with a
+    /// bounded sleep, and running that on the main thread (which is where the
+    /// click's mouseUp handler lives) hitches the card UI for up to
+    /// `activationSettleSeconds` (AI review round 2, severity 4).
     private func jump(
         _ card: NotificationCard, focusOnly: Bool = false, turn: Int? = nil,
         completion: ((JumpPolicy.JumpOutcome) -> Void)? = nil
     ) {
         let action = card.action
         let run = { card.performAction(focusOnly: focusOnly, turn: turn) }
-        guard completion != nil else {
-            if action == "jump-web" {
-                DispatchQueue.global(qos: .userInitiated).async { _ = run() }
-            } else {
-                _ = run()
-            }
+        guard completion != nil || action == "jump-web" else {
+            // Nothing to report: fire and forget (no waiting in this path).
+            _ = run()
             return
         }
-        if action == "jump-web" {
-            DispatchQueue.global(qos: .userInitiated).async {
-                let outcome = run()
-                DispatchQueue.main.async { completion?(outcome) }
-            }
-        } else {
-            completion?(run())
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = run()
+            DispatchQueue.main.async { completion?(outcome) }
         }
     }
 }
@@ -1484,9 +1483,14 @@ final class SocketServer {
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
                 turn: turn, focusOnly: focusOnly
             )
-            // Mirrors exactly what a card click concludes: `visible` = the user
-            // should have seen it, so the card is dropped; `unconfirmed` keeps
-            // the card for a retry.
+            // Mirrors the card-click conclusion for the jump path: `visible` =
+            // the user should have seen it, so the card is dropped;
+            // `unconfirmed` keeps the card for a retry.
+            //
+            // Scope: this exercises `jump-web` only. `open-folder`/`open-web`
+            // cards additionally confirm Finder/any-browser came forward in
+            // `performAction`, so their real click can report `unconfirmed`
+            // where this diagnostic would not.
             let label: String
             switch outcome {
             case .visible: label = "visible"

@@ -324,4 +324,6 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 
 `JumpPolicy.shouldDismissCard(after:)` 就是这条规则（只有 `unconfirmed` 保留），`open-folder` / `open-web` 也改成**先确认前台**（Finder / 任一浏览器）再返回，不再假装成功。
 
+**第 2 轮评审又指出一处 [4]（同样是我这次引入的）**：`open-folder` / `open-web` 的前台确认轮询跑在**主线程**上 —— `jump()` 对非 `jump-web` 动作走的是 `completion?(run())` 同步分支，而这个分支由点击的 mouseUp（主线程）调用，`confirmFrontmost` 内部是 0.75s 的 `Thread.sleep` 忙等，于是点这类卡片会让 UI 卡最多 0.75s，也违背了本文件“驱动浏览器一律下后台”的既有约定。改法：**凡是需要回报结果的动作统一进后台队列**，完成后再跳回主线程回调（`guard completion != nil || action == "jump-web" else { fire-and-forget }`）—— 不再有“只有 jump-web 才下后台”的特例。同一轮还把 `debug` 命令的注释改准：它只覆盖 `jump-web` 语义，`open-folder`/`open-web` 的真实点击会额外做前台确认，可能得出 `unconfirmed`，不要把它当成“完全镜像”。
+
 **另一处（[2] 轻微，但窗口是我这次引入的）**：把行删除改成异步回调后，回调里的 `row` 行号可能已经陈旧 —— 两次快速点击不同行、回调乱序返回时，会删掉**相邻**那一行。改成**按身份删除**：点击时抓下该行的 `CompletionEntry`，回调里用 `CardModel.index(of:)` / `removeCompletion(matching:)` 按 `message+kind+time` 重新定位，找不到就当作“已被另一次点击处理”跳过。XCTest 与 `test/core-local-check.sh` 都覆盖了「先前删掉一行后按身份删仍删对行」。
