@@ -67,11 +67,17 @@ final class JumpPolicyTests: XCTestCase {
 
     // MARK: Window-level visibility (app frontmost ≠ hosting window shown)
 
-    func testBoundsMatchToleratesSmallDisagreement() {
+    func testBoundsMatchToleratesRoundingLevelDisagreementOnly() {
+        // Tolerances: 2px on size, 4px on position — enough for the two APIs'
+        // rounding, far too tight to accept a neighbouring window.
         let host = JumpPolicy.WindowBounds(x: 100, y: 50, width: 1200, height: 800)
-        XCTAssertTrue(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 104, y: 46, width: 1204, height: 796)))
+        XCTAssertTrue(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 102, y: 47, width: 1202, height: 798)))
         XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 140, y: 50, width: 1200, height: 800)))
         XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 100, y: 50, width: 900, height: 800)))
+        // Same size, a few pixels off: that is a DIFFERENT window.
+        XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 106, y: 50, width: 1200, height: 800)))
+        // Same position, slightly different size: also a different window.
+        XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 100, y: 50, width: 1206, height: 800)))
     }
 
     func testBoundsToleranceIsTooTightToConfuseNeighbourWindows() {
