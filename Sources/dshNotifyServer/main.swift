@@ -93,6 +93,13 @@ final class NotificationCard: NSObject {
     var onToggleExpanded: ((NotificationCard) -> Void)?
     private var removing = false
 
+    /// True while the card is animating out. It stays in the stack until the
+    /// animation ends (so the window can finish moving), which is exactly the
+    /// window where a NEW completion for the same session must NOT be merged
+    /// into it: the row would be drawn on a window that is about to disappear
+    /// (user-visible as "the notification never showed up").
+    var isDismissing: Bool { removing }
+
     /// Card dimensions.
     static let width: CGFloat = 360
     static let headerHeight: CGFloat = 56
@@ -1272,9 +1279,11 @@ final class CardStack {
         let detail = request.detail
         let action = request.action ?? "jump-web"
 
-        // Merge into an existing card for the same session.
+        // Merge into an existing card for the same session — but never into one
+        // that is already flying out: its window is mid-dismiss and will be gone
+        // in a moment, so the merge would silently swallow the notification.
         if let sessionId = request.sessionId, !sessionId.isEmpty,
-           let existing = cards.first(where: { $0.sessionId == sessionId }) {
+           let existing = cards.first(where: { $0.sessionId == sessionId && !$0.isDismissing }) {
             existing.addCompletion(
                 message: message, kind: kind, detail: detail, turn: request.turn, ref: request.ref
             )

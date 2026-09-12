@@ -199,6 +199,44 @@ else
   bad "stack counts after clear: $S2"
 fi
 
+# --- 竞态：卡片正在飞出时，同会话的新完成必须拿到自己的新卡 ---
+# （dismiss 动画期间卡片仍在栈里；若被复用，通知会画在即将消失的窗口上）
+py '[{"cmd":"show","kind":"completed","sessionId":"smoke-race","sessionTitle":"RACE","message":"first","ref":"race:a","sound":false},
+     {"cmd":"show","kind":"blocked","sessionId":"smoke-race","sessionTitle":"RACE","message":"wait","ref":"race:b","sound":false}]' >/dev/null
+# 腾出这张卡的最后一行为 completed，再把它删掉 → 卡片进入 0.34s 的飞出动画
+py '[{"cmd":"clear","sessionId":"smoke-race","ref":"race:b"}]' >/dev/null
+C=$(py '[{"cmd":"clear","sessionId":"smoke-race","ref":"race:a"}]')
+if [ "$(jget "$C" remaining)" = "0" ]; then
+  ok "race setup: card is mid-dismiss (0 rows left)"
+else
+  bad "race setup failed: $C"
+fi
+# 正在飞出时又来一条同会话完成 → 必须新建卡，不能被并进那张将死的卡
+py '[{"cmd":"show","kind":"completed","sessionId":"smoke-race","sessionTitle":"RACE","message":"after-dismiss","ref":"race:c","sound":false}]' >/dev/null
+RACE_CARDS=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  S3=$(py '[{"cmd":"state"}]')
+  [ "$(jget "$S3" cards)" = "8" ] && break
+  sleep 0.2
+done
+if [ "$(jget "$S3" cards)" = "8" ]; then
+  ok "a completion arriving while a card flies out gets its own card (not swallowed)"
+else
+  bad "dismiss-race: expected 8 cards, got $S3"
+fi
+# 自清理：把那张新卡也删掉，栈回到基线（否则会带偏后面的重启断言）
+py '[{"cmd":"clear","sessionId":"smoke-race","ref":"race:c"}]' >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  S4=$(py '[{"cmd":"state"}]')
+  [ "$(jget "$S4" cards)" = "7" ] && [ "$(jget "$S4" entries)" = "8" ] && break
+  sleep 0.2
+done
+if [ "$(jget "$S4" cards)" = "7" ] && [ "$(jget "$S4" entries)" = "8" ]; then
+  ok "race cards cleaned up (stack back to baseline)"
+else
+  bad "race cleanup left the stack at: $S4"
+fi
+
 # --- persistence: cards must survive a daemon restart ---
 kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
 "$BIN" "$SOCK" >"$LOG.restart" 2>&1 &
