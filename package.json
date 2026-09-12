@@ -1,6 +1,6 @@
 {
   "name": "dsh-notify-macos",
-  "version": "0.3.0",
+  "version": "0.1.0",
   "description": "DSH plugin: persistent top-right floating cards on macOS — click to jump straight to the finished conversation's position",
   "type": "module",
   "main": "lib/index.js",
