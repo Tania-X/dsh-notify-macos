@@ -192,3 +192,19 @@ daemon 从单文件（`bin/dsh-notify-server.swift` + `swiftc`）改为 SwiftPM 
 **测试**：Playwright harness 渲染带锚点的行，断言“滚到 turn 行且在 40–80% 视口带内、未到底部”、“turn 不存在时回退到底部”、“无 turn 时行为不变”；vitest 覆盖 turn 状态机；XCTest 覆盖 `JumpLink`（含 `turn<=0` 丢弃）与快照 `turn` 往返；`socket-smoke.sh` 断言 `turn` 落盘。
 
 **边界**：turn 号来自事件流，若卡片创建时没有 turn（旧版本 host 或事件缺失）则行为退回“钉底部”——**永远有兜底，不会比之前更差**。
+
+### 18.1 锚点不在渲染窗口里怎么办（补齐：点击“加载更早”）
+
+真实 GUI 只保留**最近的一批行**（本次实测 139 行），更早的 turn 不在 DOM 里；而且它是通过**顶部按钮**（i18n `chat.loadOlder`）翻页，**不是**滚到顶部自动加载 —— 因此第一版 `scrollToTurn` 在旧 turn 上会找不到行而回退到底部。
+
+补齐逻辑（`lib/client.js`）：
+1. 找不到锚点行时，优先**点击该“加载更早”按钮**：类名做**后缀**匹配（`button[class$="_older"]` 或 `[class$="_older"] > button`；子串匹配会连 `_olderHint` 这类容器一起命中）；文案兜底只认 `\b(older|earlier)\b`、`更早`、`加载更早`（不含 `加载更多/历史`，也避免 `Folder` 这类子串），并排除 `loading/加载中`；**点击有节流**（≥500ms 一次，连续 3 次没加载出新内容就停手）；
+2. 每 150ms 一个 tick，**受 8s 时限约束**；找到后进入“持续对齐直到布局稳定 3 轮”；
+3. 仍未找到才回退 `pinToNewest`。
+
+**真实 GUI 实测**（`test/manual/real-gui-anchor.mjs`，锚定一个已滑出窗口的旧 turn）：
+```
+BEFORE: scrollTop=7303(=max, 底部), turn-tail91 未渲染
+AFTER : scrollTop=3853, scrollHeight 7303→15895（历史已翻页加载）,
+        turn-tail91 在视口 386/644px ≈ 60% → inBand, 未到底部
+```

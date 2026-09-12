@@ -43,14 +43,72 @@
         return d;
       }
 
+      // Lazy mode mimics the real GUI: only a window of recent turns is
+      // rendered, and reaching the top pages older turns in.
+      var PARAMS = new URLSearchParams(location.search);
+      var LAZY = PARAMS.has("lazy");
+      // slow=1: the paging control starts DISABLED (like the real GUI while a
+      // page is still rendering) and becomes usable a moment later.
+      var LAZY_SLOW = PARAMS.has("slow");
+      var pendingOlderTurns = [];
+
+      function appendTurn(c, turn) {
+        appendRow(c, "14:assistant-step" + turn + ":1", "assistant-step", 180);
+        appendRow(c, "9:tool-callcall_" + turn, "tool-call", 120);
+        appendRow(c, "call:call_" + turn, null, 40);
+        appendRow(c, "9:turn-tail" + turn, "turn-tail", 60);
+      }
+
+      // Decoy: a control whose label mentions history but is NOT the paging
+      // button — the client must never click it.
+      function appendDecoy(c) {
+        var btn = document.createElement("button");
+        btn.className = "decoy-history";
+        btn.textContent = "历史记录";
+        if (LAZY_SLOW) {
+          btn.disabled = true;
+          window.setTimeout(function () {
+            btn.disabled = false;
+            window.__olderEnabledAt = Date.now();
+          }, 1600);
+        }
+        btn.addEventListener("click", function () {
+          window.__decoyClicks = (window.__decoyClicks || 0) + 1;
+        });
+        c.appendChild(btn);
+      }
+
+      // The real GUI pages history in through a button at the top of the list.
+      function appendLoadOlder(c) {
+        var wrap = document.createElement("div");
+        wrap.className = "Md3f7G_older";
+        var btn = document.createElement("button");
+        btn.textContent = "Load older";
+        btn.addEventListener("click", function () {
+          if (pendingOlderTurns.length === 0) return;
+          var turn = pendingOlderTurns.shift();
+          var holder = document.createElement("div");
+          appendTurn(holder, turn);
+          var first = c.firstChild;
+          while (holder.firstChild) c.insertBefore(holder.firstChild, first);
+          window.__olderPagesLoaded = (window.__olderPagesLoaded || 0) + 1;
+          if (pendingOlderTurns.length === 0) btn.remove();
+        });
+        wrap.appendChild(btn);
+        c.appendChild(wrap);
+      }
+
       function buildRows() {
         var c = document.getElementById("content");
         c.innerHTML = "";
-        for (var turn = 1; turn <= 6; turn++) {
-          appendRow(c, "14:assistant-step" + turn + ":1", "assistant-step", 180);
-          appendRow(c, "9:tool-callcall_" + turn, "tool-call", 120);
-          appendRow(c, "call:call_" + turn, null, 40);
-          appendRow(c, "9:turn-tail" + turn, "turn-tail", 60);
+        pendingOlderTurns = [];
+        if (LAZY) {
+          pendingOlderTurns = [3, 2, 1];     // older pages, loaded on demand
+          for (var turn = 4; turn <= 6; turn++) appendTurn(c, turn);
+          appendDecoy(c);
+          appendLoadOlder(c);
+        } else {
+          for (var t = 1; t <= 6; t++) appendTurn(c, t);
         }
       }
 
@@ -112,6 +170,7 @@
       };
 
       buildRows();      // static anchored content, like a loaded conversation
+      // (lazy mode pages history in through the button rendered by buildRows)
       api.apply(ctx);   // registers hashchange + handles any on-load jump hash
     })();
   </script>
