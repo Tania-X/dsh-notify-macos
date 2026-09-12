@@ -123,3 +123,16 @@ Tests/
 2. **PR-A**：建 Package.swift + 双 target，行为零改动搬迁，验收脚本绿；
 3. **PR-B**：CardModel/ShowRequest/JumpPolicy 的 XCTest 首绿；
 4. 文档同步（README 构建节、docs 踩坑新增 SwiftPM 条目）。
+
+## 11. 本地 Core 自检（`test/core-local-check.sh`）
+
+本机只有 Command Line Tools，**`swift test` 跑不起来**（`xcrun: unable to lookup item 'PlatformPath'`），XCTest 只在 CI 的 macos-15 runner 上执行 —— 于是 Core 的错要等 CI 才知道。代价实测过一次：快照兼容性用例手写了一段 JSON 夹具，`"time": 1` 看着没问题，但 `CardStackStore` 的 decoder 是 **`.iso8601`**，解码直接抛错 → `.corrupt` → 本地全绿、CI 红。
+
+`test/core-local-check.sh` 用 `swiftc` 把 `Sources/dshNotifyCore/*.swift` 和 `test/core-local-check.swift` 编成一个可执行文件（swiftc 只允许 `main.swift` 里写顶层代码，脚本里先拷成 `main.swift`），直接跑不依赖 XCTest 的关键不变量：
+
+- 逐行锚点：每行各自的 `turn`、`removeCompletion` 重排后不丢、行号越界/表头回落 `cardTurn`、都没有则 `nil`；
+- 快照往返：卡片级 + 逐行 `turn`；
+- **旧格式兼容**：把真实快照编码后**摘掉条目的 `turn` 键**再读回（而不是手写文件 —— 手写会与 ISO8601 日期格式漂移），必须 `loaded`；
+- 深链：`&turn=` 只在正数时出现。
+
+它断言更少，**不是 XCTest 的替代品**：CI 的 `Tests` 工作流两个都跑（`swift test` + 本地自检脚本），权威基线仍是 XCTest。

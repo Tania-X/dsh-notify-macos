@@ -29,6 +29,10 @@ jobs:
         run: swift --version
       - name: Run XCTest suite (dshNotifyCoreTests)
         run: swift test
+      # 不依赖 XCTest 的 Core 自检：本机（只有 CLT）也能跑的那部分不变量，
+      # 放在这里可以保证它在 CI 上同样有效。
+      - name: Run core invariants check (no XCTest)
+        run: test/core-local-check.sh
 
   e2e:
     name: client e2e (playwright)

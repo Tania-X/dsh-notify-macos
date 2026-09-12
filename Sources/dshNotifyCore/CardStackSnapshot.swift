@@ -12,13 +12,18 @@ public struct SnapshotEntry: Codable, Equatable {
     public var kind: String
     public var detail: String?
     public var index: Int
+    /// Per-completion jump anchor (the turn it happened in).
+    public var turn: Int?
 
-    public init(message: String, time: Date, kind: String, detail: String?, index: Int) {
+    public init(
+        message: String, time: Date, kind: String, detail: String?, index: Int, turn: Int? = nil
+    ) {
         self.message = message
         self.time = time
         self.kind = kind
         self.detail = detail
         self.index = index
+        self.turn = turn
     }
 }
 
@@ -72,7 +77,10 @@ public struct CardStackSnapshot: Codable, Equatable {
 public extension CompletionEntry {
     /// DTO form for persistence.
     var snapshot: SnapshotEntry {
-        SnapshotEntry(message: message, time: time, kind: kind.rawValue, detail: detail, index: index)
+        SnapshotEntry(
+            message: message, time: time, kind: kind.rawValue, detail: detail,
+            index: index, turn: turn
+        )
     }
 
     /// Rebuild from a persisted entry (unknown kind degrades to completed).
@@ -82,7 +90,8 @@ public extension CompletionEntry {
             time: snapshot.time,
             kind: OutcomeKind.parse(snapshot.kind),
             detail: snapshot.detail,
-            index: snapshot.index
+            index: snapshot.index,
+            turn: snapshot.turn
         )
     }
 }

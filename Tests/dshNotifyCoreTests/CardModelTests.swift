@@ -132,3 +132,52 @@ final class CardModelTests: XCTestCase {
         XCTAssertFalse(m.expanded)
     }
 }
+
+/// Position-indexed jumps: every completion keeps its OWN turn anchor, so the
+/// rows of an aggregated card each land on their own position instead of all
+/// sharing the newest one.
+final class PerRowTurnTests: XCTestCase {
+    func testEachCompletionKeepsItsOwnTurn() {
+        let m = CardModel()
+        m.addCompletion(message: "newest", kind: .completed, detail: nil, turn: 93)
+        m.addCompletion(message: "middle", kind: .completed, detail: nil, turn: 88)
+        m.addCompletion(message: "oldest", kind: .completed, detail: nil, turn: 61)
+        XCTAssertEqual(m.entries.map(\.turn), [93, 88, 61])
+    }
+
+    func testCompletionsWithoutTurnStayNil() {
+        let m = CardModel()
+        m.addCompletion(message: "a", kind: .completed, detail: nil)
+        XCTAssertNil(m.entries.first?.turn)
+    }
+
+    func testRemoveCompletionReindexesWithoutLosingAnchors() {
+        let m = CardModel()
+        m.addCompletion(message: "a", kind: .completed, detail: nil, turn: 10)
+        m.addCompletion(message: "b", kind: .completed, detail: nil, turn: 20)
+        m.addCompletion(message: "c", kind: .completed, detail: nil, turn: 30)
+        XCTAssertNotNil(m.removeCompletion(index: 1))
+        XCTAssertEqual(m.entries.map(\.index), [1, 2])
+        XCTAssertEqual(m.entries.map(\.turn), [20, 30])
+        XCTAssertEqual(m.entries.map(\.message), ["b", "c"])
+    }
+
+    func testJumpTurnUsesTheClickedRowsOwnAnchor() {
+        let m = CardModel()
+        m.addCompletion(message: "a", kind: .completed, detail: nil, turn: 10)
+        m.addCompletion(message: "b", kind: .completed, detail: nil, turn: 20)
+        // Two rows, two anchors — the whole point of position-indexed jumps.
+        XCTAssertEqual(m.jumpTurn(forRow: 1, cardTurn: 20), 10)
+        XCTAssertEqual(m.jumpTurn(forRow: 2, cardTurn: 20), 20)
+    }
+
+    func testJumpTurnFallsBackToCardTurn() {
+        let m = CardModel()
+        m.addCompletion(message: "a", kind: .completed, detail: nil)   // no anchor
+        m.addCompletion(message: "b", kind: .completed, detail: nil, turn: 20)
+        XCTAssertEqual(m.jumpTurn(forRow: 1, cardTurn: 20), 20)        // row has none
+        XCTAssertEqual(m.jumpTurn(forRow: nil, cardTurn: 20), 20)      // header/blank
+        XCTAssertEqual(m.jumpTurn(forRow: 9, cardTurn: 20), 20)        // out of range
+        XCTAssertNil(m.jumpTurn(forRow: 1, cardTurn: nil))             // nothing anywhere
+    }
+}

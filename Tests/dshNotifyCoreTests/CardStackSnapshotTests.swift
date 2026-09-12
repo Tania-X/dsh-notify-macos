@@ -167,4 +167,78 @@ final class SnapshotTurnTests: XCTestCase {
         store.save(CardStackSnapshot(cards: [card]))
         XCTAssertEqual(store.load().cards.first?.turn, 91)
     }
+
+    /// Rows of an aggregated card keep their individual anchors across a
+    /// daemon restart (the file is the only memory the daemon has).
+    func testPerRowTurnsSurviveSnapshotRoundTrip() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsh-notify-rowturn-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = CardStackStore(url: url)
+        let card = SnapshotCard(
+            sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+            autoDismissSec: nil, turn: 93, expanded: true,
+            entries: [
+                SnapshotEntry(message: "a", time: Date(timeIntervalSince1970: 1), kind: "completed", detail: nil, index: 1, turn: 93),
+                SnapshotEntry(message: "b", time: Date(timeIntervalSince1970: 2), kind: "completed", detail: nil, index: 2, turn: 61),
+                SnapshotEntry(message: "c", time: Date(timeIntervalSince1970: 3), kind: "completed", detail: nil, index: 3),
+            ]
+        )
+        store.save(CardStackSnapshot(cards: [card]))
+        let loaded = store.load().cards.first
+        XCTAssertEqual(loaded?.entries.map(\.turn), [93, 61, nil])
+        XCTAssertEqual(loaded?.entries.map { CompletionEntry(snapshot: $0).turn }, [93, 61, nil])
+    }
+
+    /// Snapshot files written before per-row anchors existed (no `turn` key on
+    /// entries) must still load — otherwise an upgrade wipes live cards.
+    ///
+    /// The legacy file is derived from a real snapshot with the per-row `turn`
+    /// keys stripped, instead of being hand-written: the store decodes dates as
+    /// **ISO8601 strings** (`"time": "2023-11-14T22:13:20Z"`), so a hand-rolled
+    /// fixture drifts from the format and reports `.corrupt` for the wrong
+    /// reason.
+    func testLegacySnapshotWithoutPerRowTurnLoads() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsh-notify-legacy-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = CardStackStore(url: url)
+        store.save(CardStackSnapshot(cards: [
+            SnapshotCard(
+                sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+                autoDismissSec: nil, turn: 93, expanded: false,
+                entries: [
+                    SnapshotEntry(
+                        message: "a", time: t0, kind: "completed", detail: nil,
+                        index: 1, turn: 93
+                    )
+                ]
+            )
+        ]))
+
+        // Rewrite the file the way a pre-per-row-anchor daemon would have: the
+        // card keeps its anchor, the entries have no `turn` at all.
+        let data = try Data(contentsOf: url)
+        var root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var cards = try XCTUnwrap(root["cards"] as? [[String: Any]])
+        var card = cards[0]
+        var entries = try XCTUnwrap(card["entries"] as? [[String: Any]])
+        XCTAssertNotNil(entries[0].removeValue(forKey: "turn"), "fixture must actually drop the key")
+        card["entries"] = entries
+        cards[0] = card
+        root["cards"] = cards
+        try JSONSerialization.data(withJSONObject: root).write(to: url)
+
+        let (snapshot, diagnostic) = store.loadWithDiagnostic()
+        guard case .loaded(let count) = diagnostic else {
+            return XCTFail("legacy snapshot should load, got \(diagnostic)")
+        }
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(snapshot.cards.first?.turn, 93)
+        XCTAssertEqual(snapshot.cards.first?.entries.first?.message, "a")
+        XCTAssertEqual(snapshot.cards.first?.entries.first?.time, t0)
+        XCTAssertNil(snapshot.cards.first?.entries.first?.turn)
+    }
 }
