@@ -141,6 +141,64 @@ sleep 0.5
 kill -0 "$DPID" 2>/dev/null && ok "daemon survives a peer that hangs up mid-request (SIGPIPE)" \
   || bad "daemon died on a peer hang-up (missing SIGPIPE guard)"
 
+# --- 琥珀卡片：用户在 GUI 里处理完 → clear 按 ref 精确删行/删卡 ---
+R=$(py '[{"cmd":"show","kind":"blocked","sessionId":"smoke-clear","sessionTitle":"CLR","message":"wait-1","detail":"bash","ref":"approval:r1","sound":false},
+         {"cmd":"show","kind":"blocked","sessionId":"smoke-clear","sessionTitle":"CLR","message":"wait-2","detail":"ask_user_question","ref":"ask:r2","sound":false}]')
+if ! echo "$R" | grep -q CONN-ERR; then
+  ok "2 blocked frames carrying refs accepted"
+else
+  bad "blocked frames failed: $R"
+fi
+if grep -q '"ref" : "approval:r1"' "$CARDS" 2>/dev/null; then
+  ok "blocked correlation key persisted in the snapshot"
+else
+  bad "blocked ref missing from the snapshot"
+fi
+
+# 未知 ref：必须什么都不做（不能误删别的行）
+C=$(py '[{"cmd":"clear","sessionId":"smoke-clear","ref":"approval:nope"}]')
+if [ "$(jget "$C" removed)" = "0" ] && [ "$(jget "$C" reason)" = "no-row" ]; then
+  ok "clear with an unknown ref is a no-op"
+else
+  bad "unknown-ref clear misbehaved: $C"
+fi
+
+# 未知 session：同样什么都不做
+C=$(py '[{"cmd":"clear","sessionId":"no-such-session","ref":"approval:r1"}]')
+if [ "$(jget "$C" removed)" = "0" ] && [ "$(jget "$C" reason)" = "no-card" ]; then
+  ok "clear for an unknown session is a no-op"
+else
+  bad "unknown-session clear misbehaved: $C"
+fi
+
+# 删第一条：只掉那一行，另一行仍在（琥珀→琥珀 收窄）
+C=$(py '[{"cmd":"clear","sessionId":"smoke-clear","ref":"approval:r1"}]')
+if [ "$(jget "$C" removed)" = "1" ] && [ "$(jget "$C" remaining)" = "1" ]; then
+  ok "clear removes exactly the matching row (1 left)"
+else
+  bad "clear did not remove the matching row: $C"
+fi
+
+# 删最后一条：整张卡消失（动画结束后从栈里移除）
+C=$(py '[{"cmd":"clear","sessionId":"smoke-clear","ref":"ask:r2"}]')
+if [ "$(jget "$C" removed)" = "1" ] && [ "$(jget "$C" remaining)" = "0" ]; then
+  ok "clearing the last blocked row empties the card"
+else
+  bad "clearing the last row misbehaved: $C"
+fi
+# 卡片是动画结束后才从栈里移除的：有界轮询而不是固定 sleep（固定等待在慢机器上会 flaky）
+S2=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  S2=$(py '[{"cmd":"state"}]')
+  [ "$(jget "$S2" cards)" = "7" ] && [ "$(jget "$S2" entries)" = "8" ] && break
+  sleep 0.3
+done
+if [ "$(jget "$S2" cards)" = "7" ] && [ "$(jget "$S2" entries)" = "8" ]; then
+  ok "cleared card is gone from the stack (back to 7 cards / 8 entries)"
+else
+  bad "stack counts after clear: $S2"
+fi
+
 # --- persistence: cards must survive a daemon restart ---
 kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
 "$BIN" "$SOCK" >"$LOG.restart" 2>&1 &

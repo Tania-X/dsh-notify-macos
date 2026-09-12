@@ -20,6 +20,10 @@ public struct ShowRequest {
     public let autoDismissSec: Double?
     /// Turn whose completion the click should scroll to (position-indexed jump).
     public let turn: Int?
+    /// Correlation key of the pending user action this row waits on (blocked
+    /// rows): `approval:<id>` / `ask:<callId>`. Lets the daemon drop exactly
+    /// that row when the user resolves it in the GUI.
+    public let ref: String?
 
     public init(
         cmd: String,
@@ -34,7 +38,8 @@ public struct ShowRequest {
         sessionTitle: String?,
         sound: Bool?,
         autoDismissSec: Double?,
-        turn: Int?
+        turn: Int?,
+        ref: String? = nil
     ) {
         self.cmd = cmd
         self.title = title
@@ -49,5 +54,6 @@ public struct ShowRequest {
         self.sound = sound
         self.autoDismissSec = autoDismissSec
         self.turn = turn
+        self.ref = ref
     }
 }

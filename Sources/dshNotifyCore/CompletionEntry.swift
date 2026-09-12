@@ -12,10 +12,15 @@ public struct CompletionEntry {
     /// Turn this completion happened in — its own jump anchor, so each row of an
     /// aggregated card scrolls to ITS position instead of a shared one.
     public let turn: Int?
+    /// Correlation key for a row that waits on the user (blocked): identifies
+    /// WHICH pending approval / question raised it, so the daemon can drop
+    /// exactly that row when the user resolves it in the GUI (e.g.
+    /// `approval:<id>` or `ask:<callId>`). nil for everything else.
+    public let ref: String?
 
     public init(
         message: String, time: Date, kind: OutcomeKind, detail: String?, index: Int,
-        turn: Int? = nil
+        turn: Int? = nil, ref: String? = nil
     ) {
         self.message = message
         self.time = time
@@ -23,5 +28,6 @@ public struct CompletionEntry {
         self.detail = detail
         self.index = index
         self.turn = turn
+        self.ref = ref
     }
 }

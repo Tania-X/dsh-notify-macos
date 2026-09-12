@@ -14,9 +14,12 @@ public struct SnapshotEntry: Codable, Equatable {
     public var index: Int
     /// Per-completion jump anchor (the turn it happened in).
     public var turn: Int?
+    /// Correlation key for rows waiting on the user (see `CompletionEntry.ref`).
+    public var ref: String?
 
     public init(
-        message: String, time: Date, kind: String, detail: String?, index: Int, turn: Int? = nil
+        message: String, time: Date, kind: String, detail: String?, index: Int,
+        turn: Int? = nil, ref: String? = nil
     ) {
         self.message = message
         self.time = time
@@ -24,6 +27,7 @@ public struct SnapshotEntry: Codable, Equatable {
         self.detail = detail
         self.index = index
         self.turn = turn
+        self.ref = ref
     }
 }
 
@@ -79,7 +83,7 @@ public extension CompletionEntry {
     var snapshot: SnapshotEntry {
         SnapshotEntry(
             message: message, time: time, kind: kind.rawValue, detail: detail,
-            index: index, turn: turn
+            index: index, turn: turn, ref: ref
         )
     }
 
@@ -91,7 +95,8 @@ public extension CompletionEntry {
             kind: OutcomeKind.parse(snapshot.kind),
             detail: snapshot.detail,
             index: snapshot.index,
-            turn: snapshot.turn
+            turn: snapshot.turn,
+            ref: snapshot.ref
         )
     }
 }

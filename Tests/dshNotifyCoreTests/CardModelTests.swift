@@ -218,3 +218,69 @@ final class PerRowTurnTests: XCTestCase {
         XCTAssertNil(m.jumpTurn(forRow: 1, cardTurn: nil))             // nothing anywhere
     }
 }
+
+/// 琥珀色卡片「你在 GUI 里处理完就自动消失」的 Core 侧语义：
+/// 行带关联键 ref，按 ref 精确删除，删到只剩一行时自动折叠、删空即结束。
+final class BlockedRefTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func model() -> CardModel {
+        let m = CardModel()
+        m.addCompletion(message: "done", kind: .completed, detail: nil, at: t0, turn: 1)
+        m.addCompletion(
+            message: "等待授权：bash", kind: .blocked, detail: "bash", at: t0,
+            turn: 2, ref: "approval:a1"
+        )
+        m.addCompletion(
+            message: "等待你的回答", kind: .blocked, detail: "ask_user_question", at: t0,
+            turn: 2, ref: "ask:q1"
+        )
+        return m
+    }
+
+    func testRemoveByRefDeletesOnlyThatRow() {
+        let m = model()
+        XCTAssertEqual(m.index(ofRef: "approval:a1"), 2)
+        XCTAssertEqual(m.removeCompletion(ref: "approval:a1")?.message, "等待授权：bash")
+        XCTAssertEqual(m.entries.map(\.message), ["done", "等待你的回答"])
+        XCTAssertEqual(m.entries.map(\.index), [1, 2])          // 索引重排
+        XCTAssertNil(m.index(ofRef: "approval:a1"))
+        XCTAssertEqual(m.index(ofRef: "ask:q1"), 2)              // 另一条仍在
+    }
+
+    func testRemoveUnknownRefIsANoOp() {
+        let m = model()
+        XCTAssertNil(m.removeCompletion(ref: "approval:nope"))
+        XCTAssertEqual(m.completionCount, 3)
+    }
+
+    func testResolvingDownToOneRowAutoCollapses() {
+        let m = model()
+        m.setExpanded(true)
+        XCTAssertTrue(m.expanded)
+        _ = m.removeCompletion(ref: "approval:a1")
+        XCTAssertTrue(m.expanded, "两行仍在，不该折叠")
+        _ = m.removeCompletion(ref: "ask:q1")
+        XCTAssertFalse(m.expanded, "只剩一行必须自动折叠")
+        XCTAssertEqual(m.completionCount, 1)
+    }
+
+    func testResolvingTheLastRowEmptiesTheCard() {
+        let m = CardModel()
+        m.addCompletion(
+            message: "等待授权：bash", kind: .blocked, detail: "bash", at: t0,
+            turn: 3, ref: "approval:solo"
+        )
+        XCTAssertEqual(m.removeCompletion(ref: "approval:solo")?.kind, .blocked)
+        XCTAssertEqual(m.completionCount, 0)
+    }
+
+    func testRefSurvivesSnapshotRoundTrip() {
+        let entries = model().entries
+        XCTAssertEqual(entries.map(\.ref), [nil, "approval:a1", "ask:q1"])
+        XCTAssertEqual(
+            entries.map { CompletionEntry(snapshot: $0.snapshot).ref },
+            [nil, "approval:a1", "ask:q1"]
+        )
+    }
+}

@@ -121,6 +121,31 @@ checkEqual(twinModel.index(of: secondTwin), 2, "identical message/kind/time rows
 _ = twinModel.removeCompletion(index: 1)
 checkEqual(twinModel.removeCompletion(matching: secondTwin)?.detail, "E2", "identity removal keeps the right twin")
 
+// --- 琥珀行按 ref 精确删除（GUI 里处理完 → 卡片自己走）---
+let refModel = CardModel()
+refModel.addCompletion(message: "done", kind: .completed, detail: nil, at: ta, turn: 1)
+refModel.addCompletion(message: "等待授权：bash", kind: .blocked, detail: "bash", at: ta, turn: 2, ref: "approval:a1")
+refModel.addCompletion(message: "等待你的回答", kind: .blocked, detail: "ask_user_question", at: ta, turn: 2, ref: "ask:q1")
+refModel.setExpanded(true)
+checkEqual(refModel.index(ofRef: "approval:a1"), 2, "ref lookup finds the blocked row")
+checkEqual(refModel.removeCompletion(ref: "approval:a1")?.message, "等待授权：bash", "remove by ref deletes the right row")
+checkEqual(refModel.entries.map(\.message), ["done", "等待你的回答"], "other rows untouched")
+check(refModel.removeCompletion(ref: "approval:a1") == nil, "resolving an unknown ref is a no-op")
+check(refModel.expanded, "two rows left: must stay expanded")
+checkEqual(refModel.removeCompletion(ref: "ask:q1")?.kind, .blocked, "second blocked row removable by its own ref")
+check(!refModel.expanded, "one row left: auto-collapse")
+checkEqual(refModel.completionCount, 1, "card keeps the completed row")
+let refSnapshot = CardStackSnapshot(cards: [SnapshotCard(
+    sessionId: "s", sessionTitle: "T", action: "jump-web", path: nil, url: nil,
+    autoDismissSec: nil, turn: 2, expanded: false,
+    entries: [SnapshotEntry(message: "wait", time: ta, kind: "blocked", detail: "bash", index: 1, turn: 2, ref: "approval:a9")]
+)])
+let refURL = FileManager.default.temporaryDirectory.appendingPathComponent("dsh-core-check-ref-\(UUID().uuidString).json")
+defer { try? FileManager.default.removeItem(at: refURL) }
+let refStore = CardStackStore(url: refURL)
+refStore.save(refSnapshot)
+checkEqual(refStore.load().cards.first?.entries.first?.ref, "approval:a9", "blocked ref survives a restart")
+
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
 checkEqual(
     JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "abc", turn: 60),

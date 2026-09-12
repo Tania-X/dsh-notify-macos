@@ -369,3 +369,40 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 **被删除的机制**（回溯用）：`WindowBounds` / `boundsMatch` / `isWindowOnScreen` / `shouldEscalateForWindow` / `visibilityVerdict` / `JumpOutcome` / `shouldDismissCard` / `bringBrowserForward` / `CGWindowListCopyWindowInfo` 查询 / 两级升级阶梯 / 激活等待与容差常量 / AppleScript 的 bounds 回报 / Chromium 回退哨兵。净减约 150 行与 2 个不可验证分支。
 
 **保留的（与前几节无关、独立成立）**：逐行锚点（§18.2）、历史翻页 seek（§18.1）、按身份删行（并发点击安全）、结果回报统一下后台队列（不卡主线程）、daemon 自愈、SIGPIPE 防护（§21）、跳转失败不吞卡片。
+
+## 24. 琥珀卡片：你在 GUI 里处理完，卡片自己消失（含自动折叠）
+
+**需求**：琥珀色（blocked）卡片代表「等你处理」。如果你直接在 GUI 上点了同意/拒绝（或回答了 `ask_user_question`），对应的卡片就该自动删掉，不用再去点卡片。成功/失败卡片暂时不动。
+
+**事件取证（真实会话日志）**：
+
+| 产生琥珀行 | 已处理 |
+| --- | --- |
+| `approval/asked` → `{id, toolName, callId, reason}` | `approval/decided` → `{id, outcome}`（**同一个 id**） |
+| `tool/call`（`name=ask_user_question`）→ `{callId}` | `tool/result` → `message.source.callId`（问句被回答时工具才返回） |
+
+两条链路都有**精确关联键**，所以实现不是"按 kind 猜删"，而是给每一行一个 `ref`。
+
+**设计**：
+
+1. **行级关联键**（与 `turn` 同样的下沉方式）：`CompletionEntry.ref` / `SnapshotEntry.ref`，取值 `approval:<id>` 或 `ask:<callId>`；随快照持久化，daemon 重启后仍能清。host 侧 `buildShowPayload` 把它放进 show 帧（`BlockedRefTests` 与 payload 单测覆盖）。
+2. **host 判定**：`blockedRef(event)`（产生键）、`resolvedRef(event)`（解决键）、`nextPendingRefs(state, event)`（每会话 pending 集合）、`shouldClearResolved(ref, wasPending, event)`：
+   - 我们登记过的 → 发 clear；
+   - `approval/decided` 即使没登记过也发（**自愈**：host 重启丢了 pending 时，陈旧的琥珀卡不会赖着不走）；
+   - 普通 `tool/result` 只在登记过时发（**每次工具调用都会产生它**，不能无脑发）。
+3. **协议**：`{cmd:"clear", sessionId, ref}` → 回复 `{"ok":true,"removed":0|1,"remaining":N,"reason":"no-card"|"no-row"}`。daemon 按 `ref` 删行：**剩 0 行 → 卡片 dismiss**（动画后出栈）；**剩 1 行 → 自动折叠**（`CardModel.removeCompletion` 的既有语义）并重新排布 + 落盘。
+4. **绝不误删**：未知 `ref`/未知 session 一律 no-op（不按 kind 猜）；你在 GUI 处理前已经手动点掉该行的话，clear 就是 `removed:0, reason:"no-row"`。
+
+**与既有原则的关系**：这**不冲突**于「跳转失败不吞卡片」—— 那是"你点了卡片但没跳成"，这是"你已经把问题处理掉了"，两者的触发源完全不同。
+
+**测试（自测三层 + 冒烟）**：
+
+- vitest **45 条**：纯函数两套（`blocked-resolve.test.js`：键的构造/解析、pending 状态机、payload 必带 ref）+ **真 socket 集成**（`blocked-resolve-integration.test.js`：起一个假 daemon，驱动真实 `apply()`，断言 asked→show(带 ref)、decided→clear(同 ref)、ask→tool/result→clear、**无关 tool/result 不发 clear**、未登记的 decided 仍自愈、别的审批 decided 时不动）；
+- XCTest `BlockedRefTests` 5 条（按 ref 只删该行 / 未知 ref no-op / 删到一行自动折叠 / 删空即计数 0 / ref 快照往返）+ 旧格式快照（连 `ref` 都没有）仍能加载；
+- `test/core-local-check.sh` 同款断言（本机无需 XCTest 即可跑）；
+- `test/socket-smoke.sh` **17 条**：`ref` 落盘、未知 ref/session no-op、删该删的那行、删最后一行卡片消失且栈计数回落、重启后恢复。
+
+**两个坑（都写在测试注释里）**：
+
+1. 集成测试最初用 `os.tmpdir()` 造 unix socket 路径 → macOS 上超过 ~104 字节上限，**connect 静默失败**，看起来像"接线没接对"；改成 `/tmp/...` 短路径。
+2. `waitFor(帧数)` 被**预热 ping** 满足（`apply()` 启动就 ping 一次）→ 断言永远看不到 show；改成按**命令**计数（`waitFor("show")`）。
