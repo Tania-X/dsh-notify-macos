@@ -1523,6 +1523,13 @@ final class SocketServer {
 let arguments = CommandLine.arguments
 let socketPath = arguments.count > 1 ? arguments[1] : "/tmp/dsh-notify-macos.sock"
 
+// A socket server must survive a peer that hangs up before reading its reply:
+// without this, writing to a closed socket raises SIGPIPE and kills the daemon
+// silently (no crash report, empty log — observed as "the daemon just
+// disappeared"). The write helper ignores write() failures; this makes them
+// non-fatal instead of terminating the process.
+signal(SIGPIPE, SIG_IGN)
+
 // Only one daemon may own the socket; if another is alive, exit quietly.
 if daemonAlreadyRunning(socketPath) {
     exit(0)

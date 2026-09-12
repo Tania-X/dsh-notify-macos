@@ -126,6 +126,21 @@ else
   bad "per-row turn anchors wrong: $ROWTURNS"
 fi
 
+# --- 对端在读回复前挂断：守护进程必须活着（SIGPIPE 曾把它静默杀死）---
+# 复现真实事故：请求没带结尾换行时，daemon 会阻塞在 read() 直到对端关闭，
+# 然后才处理请求并写回复 —— 此时 fd 已失效。没有 SIGPIPE 防护就是“凭空消失”。
+python3 - "$SOCK" <<'PYEOF2'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2)
+s.connect(sys.argv[1])
+s.sendall(json.dumps({"cmd": "ping"}).encode())   # 故意不带 \n
+s.close()                                        # 直接挂断
+PYEOF2
+sleep 0.5
+kill -0 "$DPID" 2>/dev/null && ok "daemon survives a peer that hangs up mid-request (SIGPIPE)" \
+  || bad "daemon died on a peer hang-up (missing SIGPIPE guard)"
+
 # --- persistence: cards must survive a daemon restart ---
 kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
 "$BIN" "$SOCK" >"$LOG.restart" 2>&1 &

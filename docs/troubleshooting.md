@@ -329,3 +329,15 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 **第 3 轮评审本身「质量未达标」**（judge 62/100 < 阈值 70，工具发了降级说明并提示 rerun；judge 同时指出这轮**没审到** `JumpPolicy` 新增的激活/可见性逻辑 —— 属漏报）。它未过门禁的两条里，有一条是真问题：**载荷缺失时卡片会永远点不掉** —— `open-folder`（`path` 为空）与 `open-web`（`url` 缺失/不可解析）返回 `unconfirmed`，于是卡片被永久保留，只能拖走。这类退化载荷本来就“没有动作可做、也就没有可见性可言”，应返回 `notApplicable`（与旧行为一致：点一下即消除）。另一条是把身份匹配键从 `message+kind+time` 加严到**再加 `detail` 与 `turn`**（避免同 message/kind/time 的两行混淆），两条都只有几行，已一并修掉。
 
 **另一处（[2] 轻微，但窗口是我这次引入的）**：把行删除改成异步回调后，回调里的 `row` 行号可能已经陈旧 —— 两次快速点击不同行、回调乱序返回时，会删掉**相邻**那一行。改成**按身份删除**：点击时抓下该行的 `CompletionEntry`，回调里用 `CardModel.index(of:)` / `removeCompletion(matching:)` 按 `message+kind+time` 重新定位，找不到就当作“已被另一次点击处理”跳过。XCTest 与 `test/core-local-check.sh` 都覆盖了「先前删掉一行后按身份删仍删对行」。
+
+## 21. daemon「凭空消失」的两级真因：请求缺换行 + 缺 SIGPIPE 防护
+
+排查「点击卡片无反应」时顺手撞出来的独立问题，两级原因叠加，表现为**没有 crash 报告、日志 0 字节、进程消失**：
+
+1. **协议：请求以换行结尾才算完整。** daemon 的读取循环是
+   `if buffer.contains(0x0A) { break }` —— 客户端不发结尾 `\n`，daemon 就**一直阻塞在 `read()`**，直到对端关闭（EOF）才处理这条请求。表现：调用方看到“超时”，而请求其实**在处理时成功了**（现场：我的人工推送脚本每帧都“超时”，但卡片一张不落全落盘 —— 因为它是在脚本关闭 socket 之后才被处理的）。
+2. **缺 SIGPIPE 防护。** 请求在 EOF 之后才被处理，此时对端 fd 已关闭；daemon 写回复 → `SIGPIPE` → **进程被信号杀死**（默认动作），于是没有 crash 报告、日志也是空的。这就是同一天里 daemon 数次“静静消失”的直接原因；插件自己派发（`lib/index.js` 的 `socket.write(\`…\n\`)`）**是带换行的**，所以正常使用不会触发，是**人工探测脚本**（`test/manual/push-anchors.py` 最初版本）把它踩出来的。
+
+**修法**：`Sources/dshNotifyServer/main.swift` 在 main 顶部 `signal(SIGPIPE, SIG_IGN)` —— 作为 socket 服务端，对端提前挂断绝不能杀死守护进程；写失败已被忽略，现在不再致命。探测脚本补上结尾 `\n`（并注明协议要求）。`test/socket-smoke.sh` 新增断言永久锁住这条：**发一条不带换行的请求后立刻挂断，daemon 必须仍然存活**（`PASS: daemon survives a peer that hangs up mid-request (SIGPIPE)`）。
+
+**附带收获**：这两周里 daemon 每次意外死掉都能被插件重新拉起（第 15 号 PR 的自愈逻辑），本次现场也复现了两次（PID 32114 → 32162 → 32244），并且**插件拉起的 daemon 能正常驱动 Safari、没有 `-10004`** —— 说明 Automation 授权沿 GUI server 的责任链继承，人工在终端里起 daemon 已非必需。

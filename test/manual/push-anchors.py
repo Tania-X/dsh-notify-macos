@@ -31,7 +31,11 @@ def send(sock_path, payload, expect_reply=True):
     s.settimeout(3 if expect_reply else 1)
     try:
         s.connect(sock_path)
-        s.sendall(json.dumps(payload, ensure_ascii=False).encode())
+        # The daemon treats a request as complete only at a newline
+        # (`if buffer.contains(0x0A) { break }`): without it the daemon blocks
+        # in read() until the peer closes, so the caller sees a bogus timeout
+        # and the request is only processed on EOF.
+        s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode())
         if not expect_reply:
             return "sent"
         return s.recv(4096).decode().strip() or "(no reply)"
