@@ -819,9 +819,12 @@ enum BrowserJumper {
 
         // App-frontmost is NOT enough: with the hosting window on another Space
         // (or minimized/hidden) the app can be perfectly frontmost while the
-        // user still looks at a DIFFERENT window of it. Escalate whenever the
-        // hosting WINDOW is not on the active Space.
-        let needsEscalation = !((frontmost == channel.bundleId) && (shown != false))
+        // user still looks at a DIFFERENT window of it. Escalate unless the
+        // hosting WINDOW is confirmed on screen — `nil` (unknown) escalates
+        // too, it is not evidence of visibility.
+        let needsEscalation = JumpPolicy.shouldEscalateForWindow(
+            windowOnScreen: shown, appIsFrontmost: frontmost == channel.bundleId
+        )
         var escalated = false
         if needsEscalation {
             escalated = true
@@ -863,12 +866,13 @@ enum BrowserJumper {
             }
         }
         let appFrontmost = frontmost == channel.bundleId
-        // `shown == nil` (no bounds reported) falls back to the app-level check
-        // so an unusable AppleScript reply can never make us report "invisible".
-        let visible = appFrontmost && shown != false
+        let visible = JumpPolicy.visibilityVerdict(
+            windowOnScreen: shown, appIsFrontmost: appFrontmost
+        )
         dshLog(
             "[activate] \(appName) frontmost=\(appFrontmost) windowOnScreen=\(describe(shown))"
-            + " visible=\(visible) escalated=\(escalated) before=\(before ?? "nil")\n"
+            + " visible=\(visible) escalated=\(escalated) before=\(before ?? "nil")"
+            + " (verdict=\(shown == nil ? "app-level-only" : "window-level"))\n"
         )
         return visible
     }
@@ -1177,7 +1181,10 @@ enum BrowserJumper {
         let parts = cleaned.split(separator: ",").compactMap {
             Double($0.trimmingCharacters(in: .whitespaces))
         }
-        guard parts.count == 4 else { return nil }
+        guard parts.count == 4 else {
+            dshLog("[window] host-window bounds unusable (\(cleaned)); window-level check unavailable\n")
+            return nil
+        }
         let width = parts[2] - parts[0]
         let height = parts[3] - parts[1]
         guard width > 0, height > 0 else { return nil }

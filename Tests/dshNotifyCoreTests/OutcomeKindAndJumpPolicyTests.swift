@@ -74,6 +74,17 @@ final class JumpPolicyTests: XCTestCase {
         XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 100, y: 50, width: 900, height: 800)))
     }
 
+    func testUnknownWindowStateIsNotTreatedAsVisible() {
+        // `nil` (browser could not report the window frame) tends to happen
+        // exactly when the window is minimized/off-Space, so it must escalate
+        // instead of passing as "visible" — the defect this rule closes.
+        XCTAssertTrue(JumpPolicy.shouldEscalateForWindow(windowOnScreen: nil, appIsFrontmost: true))
+        XCTAssertFalse(JumpPolicy.shouldEscalateForWindow(windowOnScreen: true, appIsFrontmost: true))
+        XCTAssertFalse(JumpPolicy.visibilityVerdict(windowOnScreen: false, appIsFrontmost: true))
+        XCTAssertTrue(JumpPolicy.visibilityVerdict(windowOnScreen: nil, appIsFrontmost: true))
+        XCTAssertFalse(JumpPolicy.visibilityVerdict(windowOnScreen: true, appIsFrontmost: false))
+    }
+
     func testHostingWindowIsRecognisedOnlyWhenOnScreen() {
         let host = JumpPolicy.WindowBounds(x: 0, y: 25, width: 1440, height: 875)
         let otherSpaceWindow = JumpPolicy.WindowBounds(x: 200, y: 100, width: 900, height: 600)

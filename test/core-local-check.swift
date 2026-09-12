@@ -148,6 +148,22 @@ check(!JumpPolicy.isWindowOnScreen(hostWindow, among: [otherWindow]),
 check(!JumpPolicy.isWindowOnScreen(hostWindow, among: []),
       "no on-screen windows at all = hosting window is not visible")
 
+// --- 判定规则：未知（nil）不等于可见，必须仍然尝试升级 ---
+check(JumpPolicy.shouldEscalateForWindow(windowOnScreen: nil, appIsFrontmost: true),
+      "unknown window state still escalates (nil is not evidence of visibility)")
+check(JumpPolicy.shouldEscalateForWindow(windowOnScreen: false, appIsFrontmost: true),
+      "hosting window off-screen escalates")
+check(!JumpPolicy.shouldEscalateForWindow(windowOnScreen: true, appIsFrontmost: true),
+      "confirmed on-screen + frontmost needs no escalation")
+check(JumpPolicy.shouldEscalateForWindow(windowOnScreen: true, appIsFrontmost: false),
+      "window on screen but app behind still escalates")
+check(JumpPolicy.visibilityVerdict(windowOnScreen: false, appIsFrontmost: true) == false,
+      "off-screen window is NOT visible even with the app frontmost")
+check(JumpPolicy.visibilityVerdict(windowOnScreen: nil, appIsFrontmost: true),
+      "unknown falls back to app-level instead of blocking the card forever")
+check(JumpPolicy.visibilityVerdict(windowOnScreen: true, appIsFrontmost: false) == false,
+      "hosting window visible but app behind must not count")
+
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
 checkEqual(
     JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "abc", turn: 60),

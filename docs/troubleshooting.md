@@ -358,3 +358,16 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 4. 日志新增 `windowOnScreen=true|false|unknown`；取不到 bounds 时返回 `unknown` 并**退回应用级判据**，绝不因为解析失败而误报不可见。
 
 **测试**：`JumpPolicy.boundsMatch` / `isWindowOnScreen` 的 XCTest 与 `test/core-local-check.sh` 断言（含「同一 App 的另一个窗口在屏**不算**宿主窗口可见」这条关键用例）；冒烟 10/10。
+
+### 22.1 一轮评审后的修正：`nil`（未知）不等于「可见」
+
+第一版把三态写成了 `shown != false`，等于**把「未知」当成「在屏」**：AppleScript 取不到 bounds（解析失败、或窗口不可见时取不到有效值 —— 恰恰最可能发生在窗口在别的 Space / 被最小化时）时，既不升级、又直接 `visible = true`，于是**又回到「卡片被消除但用户什么也没看到」**。评审判 [4]，判得对。
+
+改成两条纯规则（Core，可测）：
+
+| 规则 | 语义 |
+| --- | --- |
+| `shouldEscalateForWindow(windowOnScreen:appIsFrontmost:)` | **除非**「确认在屏 **且** App 在前台」，否则升级 —— `nil` 也升级 |
+| `visibilityVerdict(windowOnScreen:appIsFrontmost:)` | 窗口级证据优先；确为 `false` → 不可见；**完全无证据（`nil`）才**退回应用级，避免某些浏览器永不上报窗口 frame 时卡片变得永远点不掉 |
+
+日志里也明确标注这次结论是 `window-level` 还是 `app-level-only`，并且 `parseHostBounds` 失败不再静默 —— 出现 `[window] host-window bounds unusable` 就能立刻知道降级发生了（若长期出现，说明该浏览器方言需要另配取值方式）。

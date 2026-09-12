@@ -218,6 +218,35 @@ public enum JumpPolicy {
         onScreen.contains { boundsMatch(host, $0) }
     }
 
+    /// Whether activation must escalate, given the WINDOW-level evidence.
+    ///
+    /// `windowOnScreen == nil` means "the browser could not tell us where the
+    /// hosting window is" — that must NOT be treated as visible: `nil` shows up
+    /// exactly when the window is minimized/off-Space, so treating it as fine
+    /// would skip the escalation and dismiss the card over a jump the user
+    /// cannot see (AI review, severity 4). Unknown therefore escalates too.
+    public static func shouldEscalateForWindow(
+        windowOnScreen: Bool?, appIsFrontmost: Bool
+    ) -> Bool {
+        !(appIsFrontmost && windowOnScreen == true)
+    }
+
+    /// Final "the user can see it" verdict.
+    ///
+    /// Window-level evidence wins when available. With no evidence at all
+    /// (`nil`) we fall back to the app-level answer rather than reporting
+    /// "invisible" forever — a browser that never reports window frames must
+    /// not leave cards permanently un-dismissable. Callers log which branch was
+    /// taken so a persistent `unknown` is visible in the logs.
+    public static func visibilityVerdict(
+        windowOnScreen: Bool?, appIsFrontmost: Bool
+    ) -> Bool {
+        switch windowOnScreen {
+        case .some(let onScreen): return onScreen && appIsFrontmost
+        case .none: return appIsFrontmost
+        }
+    }
+
     /// Whether the card/row may be dropped after an action with this outcome.
     /// Only `unconfirmed` keeps it — `visible` is done, `notApplicable` was
     /// never about a jump.
