@@ -1,7 +1,7 @@
 {
   "name": "dsh-notify-macos",
-  "version": "0.2.0",
-  "description": "DSH plugin: persistent top-right floating cards on macOS; click jumps the browser to the finished conversation's session (client-half hash deep-link)",
+  "version": "0.3.0",
+  "description": "DSH plugin: persistent top-right floating cards on macOS — click to jump straight to the finished conversation's position",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -38,5 +38,27 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tania-X/dsh-notify-macos.git"
+  },
+  "homepage": "https://github.com/Tania-X/dsh-notify-macos#readme",
+  "bugs": {
+    "url": "https://github.com/Tania-X/dsh-notify-macos/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "macos",
+    "notification",
+    "cordis"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=22"
   }
 }

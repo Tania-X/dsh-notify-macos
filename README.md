@@ -1,224 +1,176 @@
 # dsh-notify-macos
 
-DeepSeek Harness 插件：每次对话/任务完成后，在 MacBook 屏幕右上角弹出**常驻悬浮通知卡片**，点击卡片即可**跳转到完成该任务的会话**（跨 Session 精确跳转），让你即使切到后台也能第一时间回到任务现场。
-
-## 行为
-
-- 每个会话的对话轮次处理完毕时（agent `running → idle`），弹出一张编号卡片，悬停在右上角，直到你处理。
-- **卡片标题 = 会话名**（如「DeepSeek插件任务完成提醒」），正文 = 「任务完成，点击查看详情」——一眼知道是哪个会话完成了。
-- **点击卡片** → 浏览器画面切到该会话并滚到最新消息（任务完成处），**无页面刷新**。
-- **向右拖拽卡片** → 直接清除。
-- **多任务同时完成**：多张卡片带递增编号堆叠，可分别处理。
-
-## 消息链路
+DeepSeek Harness（DSH）的 macOS 通知插件：任务一结束，就在屏幕右上角弹出**常驻悬浮卡片**；
+点一下，浏览器**原地跳到那个会话的完成位置**。切去干别的也不怕错过 —— 卡片会一直等你。
 
 ```
-DSH host (Node 进程)
-│
-│ 1. 插件监听 agent/status 与 session/event，把 completed / error / blocked 三类结束事件归一
-│
-│ 2. 插件经 Unix socket 向守护进程推送一条 show 指令
-│    └─ socket: $TMPDIR/dsh-notify-macos.sock
-│    └─ 载荷: { sessionId, sessionTitle, kind, message, detail?, action:"jump-web" }
-│
-▼
-dsh-notify-server (Swift/AppKit 守护进程)
-│
-│ 3. 守护进程在屏幕右上角绘制编号悬浮卡片
-│    └─ 标题 = sessionTitle（会话名）；正文 = 完成文案
-│    └─ 卡片常驻，等待点击或右拖
-│
-│ 4. 用户点击卡片 → BrowserJumper 接管
-│
-▼
-浏览器 (Safari / Chrome / Edge / Brave / Arc / Opera / Firefox)
-│
-│ 5. 守护进程先探测哪个浏览器已打开 DSH Web UI（只枚举标签页，不执行 JS）
-│    └─ 只在承载 GUI 的那个浏览器实例内操作，绝不跳去别的浏览器
-│
-│ 6. 向 GUI 标签页注入 JS，优先“原地切换”：
-│    └─ 按 sessionTitle 精确/模糊匹配侧边栏会话行（role="treeitem"）
-│    └─ 匹配成功 → 模拟点击该行 → GUI 切到目标会话并滚到底部（无刷新）
-│
-│ 7. 边界回退（会话刚被删除/归档，行不可见）：
-│    └─ 清除持久化会话选择并刷新 → GUI 自动落到第一个可用 Session
-│    └─ 一个 Session 都没有 → GUI 显示空状态/新建会话视图
-│
-│ 8. 若 JS 注入被拒绝（浏览器未授权）：
-│    └─ 至少聚焦 GUI 标签页（open location 激活既有标签，不新开窗口）
-│    └─ 若没有可脚本化浏览器 → 用系统默认方式打开 GUI
+┌──────────────────────────────────────────┐
+│  ● 我的数据分析会话                  ▾   │  ← 标题 = 会话名
+│    已完成 2 次 · 最近 14:32              │  ← 同一会话多次完成会合并
+├──────────────────────────────────────────┤
+│  14:31  任务已完成                        │  ← 展开后逐行点：跳各自的位置
+│  14:32  任务失败，点击查看详情            │
+└──────────────────────────────────────────┘
 ```
 
-## 组件
+## 三种状态，一眼分辨
 
-| 组件 | 位置 | 职责 |
+| 卡片 | 什么时候出现 | 点击它 |
 | --- | --- | --- |
-| Cordis 插件 | `lib/index.js`（host 进程内） | 监听完成事件，经 socket 推送给守护进程 |
-| Swift 守护进程 | `bin/dsh-notify-server` | 自绘悬浮卡片；点击后控制浏览器跳转 |
-| Web profile 注册 | `$DSH_HOME/profiles/web/cordis.patch.yml` | 加载插件（HMR 热更新） |
-
-守护进程不可用时，插件回退到 `osascript` 弹一次系统通知，保证完成不被静默丢弃。
+| 🟢 **completed** | 任务正常结束 | 跳到这次完成的**位置**（不是会话底部） |
+| 🔴 **error** | 任务异常结束（报错/中断/超 token） | 同上，去看发生了什么 |
+| 🟠 **blocked** | 需要你处理：等你授权、或等你回答问题 | 跳到等你处理的现场 |
 
 ## 安装
 
-插件已安装到 web profile 并热加载：
-
-```
-$DSH_HOME/profiles/web/plugins/dsh-notify-macos/lib/index.js
-$DSH_HOME/profiles/web/plugins/dsh-notify-macos/bin/dsh-notify-server
-$DSH_HOME/profiles/web/cordis.patch.yml   # notify-macos 条目
-```
-
-验证加载状态：
+前置：macOS（插件只支持 macOS）+ 已经在用 DSH 的 web profile（`dsh web`）。
 
 ```bash
+# 1) 装进 web profile（pnpm 模式，与 dsh 官方插件一致）
+git clone https://github.com/Tania-X/dsh-notify-macos.git
+dsh plugin --profile web add /path/to/dsh-notify-macos
+#    也可以直接： dsh plugin --profile web add github:Tania-X/dsh-notify-macos
+
+# 2) 注册插件（config 可整段照抄，字段见下面的「配置」）
+$EDITOR "$DSH_HOME/profiles/web/cordis.patch.yml"
+```
+
+```yaml
+# $DSH_HOME/profiles/web/cordis.patch.yml
+- insert:
+    - id: notify-macos
+      name: dsh-notify-macos
+      config:
+        enabled: true
+        clickAction: jump-web
+        webUrl: http://127.0.0.1:3080
+        socketPath: /tmp/dsh-notify-macos.sock
+        # 默认就是包内路径，一般不用写；写了要指到真正装好的位置：
+        serverPath: /Users/<你>/.dsh/profiles/web/node_modules/dsh-notify-macos/bin/dsh-notify-server
+```
+
+```bash
+# 3) 重启 dsh，然后让它完成一个小任务试试
+dsh web
+```
+
+**装好了怎么确认**
+
+```bash
+# 插件被 GUI 加载了吗（应看到 notify-macos，且是 active）
 curl -s -X POST http://127.0.0.1:3080/api/pluginInventory/list \
   -H "Content-Type: application/json" \
   -d '{"type":"client-request","rpcId":"v1","method":"pluginInventory/list","payload":{"args":{}}}'
-# 应看到 include:notify-macos ... active
+
+# 守护进程活着吗（注意：请求必须以换行结尾）
+printf '{"cmd":"ping"}\n' | nc -U /tmp/dsh-notify-macos.sock      # → {"ok":true}
 ```
 
-验证守护进程：
+> **Intel Mac / 二进制跑不起来？** 仓库里预编译的 `bin/dsh-notify-server` 是 **Apple Silicon（arm64）**。
+> Intel 机器上自行编译一次即可（需要 Xcode Command Line Tools）：
+> ```bash
+> cd /path/to/dsh-notify-macos && swift build -c release && cp .build/release/dsh-notify-server bin/
+> ```
+> 若二进制被 Gatekeeper 拦下（从浏览器下载的压缩包会带隔离标记）：
+> `xattr -dr com.apple.quarantine /path/to/dsh-notify-macos`
 
-```bash
-ls -l $TMPDIR/dsh-notify-macos.sock
-echo '{"cmd":"ping"}' | nc -U $TMPDIR/dsh-notify-macos.sock   # → {"ok":true}
-```
+## 使用
+
+装着就不用管了。任务结束时卡片自己出现，然后：
+
+| 操作 | 效果 |
+| --- | --- |
+| **点某一行** | 浏览器跳到那一行**自己的完成位置**，并移除该行（一行一行处理） |
+| **点卡片标题** | 展开/收起多行明细（单行卡片点了就是跳转） |
+| **往右拖拽** | 清掉这张卡（整个会话的通知一起清） |
+| 什么都不做 | 卡片常驻，直到你处理；**重启 dsh / daemon 崩了也不会丢**（有快照恢复） |
+| 🟠 琥珀行 | 你在 GUI 里点了同意/拒绝、或回答了提问之后，**它自己消失**（不用手动清） |
+
+跳转是**原地切换**：浏览器不刷新、不新开标签页，直接落到该会话的那次完成处；如果那次完成已经滚出可视区，它会自动点「加载更早」翻回去。
+
+**首次点击会弹一次系统授权**：macOS 会问「**终端**（或你启动 dsh 的那个 App）想要控制 Safari / 浏览器」→ 允许即可。
+这是 macOS 自动化权限，只需一次；它归属于**启动 dsh 的那个 App**，不是本插件。
 
 ## 配置
 
-在 `cordis.patch.yml` 的 `notify-macos.config` 中修改：
+都写在 `cordis.patch.yml` 的 `notify-macos.config` 里：
 
-| 字段 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `enabled` | boolean | `true` | 总开关 |
-| `title` | string | `"DeepSeek Harness"` | 无会话名时的兜底标题（正常显示会话名） |
-| `messageCompleted` | string | `"任务已完成"` | 完成（completed）时卡片正文 |
-| `messageError` | string | `"任务失败，点击查看详情"` | 出错（error）时卡片正文 |
-| `messageBlocked` | string | `"需要你处理，点击查看详情"` | 等待处理（blocked：审批/提问）时卡片正文 |
-| `sound` | boolean | `false` | 完成时是否播放提示音 |
-| `rootOnly` | boolean | `true` | 仅顶层会话完成时通知（`false` 则子代理完成也通知） |
-| `clickAction` | string | `"jump-web"` | 点击行为：`jump-web`（跳会话）/ `open-folder` / `open-web` / `none` |
-| `webUrl` | string | `"http://127.0.0.1:3080"` | Web UI 地址 |
-| `autoDismissSec` | number | `0` | 卡片自动消失秒数（`0` 常驻） |
-
-> 卡片栈会持久化到 `<socketPath>.cards.json`（原子写）：daemon 重启/崩溃后未处理的卡片自动恢复，卡片仍然“常驻直到你处理”。`state` 诊断命令可查当前卡数/条目数。
-| `socketPath` | string | `$TMPDIR/dsh-notify-macos.sock` | 与守护进程通信的 socket |
-| `serverPath` | string | 插件包内 `bin/dsh-notify-server` | 守护进程路径 |
-
-## 一次性授权
-
-跨会话跳转依赖守护进程控制浏览器，需要两项一次性授权：
-
-1. **macOS 自动化**：首次点击卡片时系统弹窗「dsh-notify-server 想要控制 Google Chrome / Safari」→ 点**允许**。
-2. **浏览器允许 AppleScript 执行 JS**：
-   - Safari：设置 → 高级 → 开启「显示开发菜单」→ 开发 → 勾选「允许 JavaScript 从 Apple Events」
-   - Chrome：菜单 View → Developer → 勾选 **Allow JavaScript from Apple Events**
-
-验证授权：
-
-```bash
-echo '{"cmd":"probe"}' | nc -U $TMPDIR/dsh-notify-macos.sock
-# → {"ok":true,"chrome":true,"safari":true}
-```
-
-未授权时点击会退化为「聚焦 GUI 标签页」（不精确跳会话）。
-
-## 开发
-
-```bash
-swift build -c release                                   # 编译守护进程（SwiftPM）
-cp .build/release/dsh-notify-server bin/                 # 产物就位（插件 serverPath 默认指向 bin/）
-npm test                                                 # host/client 纯逻辑单测（vitest）
-swift test                                               # Core XCTest（需含 XCTest 的 Xcode/CI；本地 CLT-only 会报 XCTest not available）
-./test/parse-swift-tests.sh                              # 本地语法自检测试源码（无需 XCTest）
-./test/typecheck-swift-tests.sh                          # 本地类型检查 XCTest 源码（桩模块，无需 XCTest）
-./test/core-local-check.sh                               # 本地 Core 不变量自检（swiftc 直编，无需 XCTest）
-./test/socket-smoke.sh                                   # daemon 协议冒烟基线
-npm run test:e2e                                        # client 半区 Playwright（harness 页，无需真 dsh web）
-```
-
-CI：`.github/workflows/tests.yml` 跑 `npm test`（ubuntu）、`swift test` + `test/core-local-check.sh`（macos-15）、
-`npx playwright test`（ubuntu）。
-
-
-源码布局（SwiftPM，见 `docs/l2-swiftpm-split.md`）：`Sources/dshNotifyCore`（纯逻辑库，可单测）+
-`Sources/dshNotifyServer`（AppKit 壳）。测试需要含 XCTest 的完整 Xcode 工具链。
-
-Socket 协议（JSON Lines）：
-
-| 命令 | 载荷 | 说明 |
+| 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `show` | `{sessionId, sessionTitle, title, kind, message, detail?, turn?, action, url, sound, autoDismissSec}` | 弹卡片（kind: `completed`/`error`/`blocked`；同一 session 多次完成合并为一张聚合卡；`turn` 为位置锚点） |
-| `ping` | — | 存活探测 → `{"ok":true}` |
-| `probe` | — | 守护进程健康探测 → `{"ok":true,"daemon":true}` |
-| `debug` | `{url, sessionId, sessionTitle, focusOnly?}` | 手动触发一次跳转/聚焦（诊断用，`focusOnly:true` 模拟 blocked 点击） |
+| `enabled` | `true` | 总开关 |
+| `clickAction` | `"jump-web"` | 点击行为：`jump-web` 跳会话 / `open-web` 打开 `webUrl` / `open-folder` 打开工作目录 / `none` 只消除 |
+| `webUrl` | `"http://127.0.0.1:3080"` | GUI 地址（端口不同就改这里） |
+| `messageCompleted` | `"任务已完成"` | 🟢 卡片正文 |
+| `messageError` | `"任务失败，点击查看详情"` | 🔴 卡片正文 |
+| `messageBlocked` | `"需要你处理，点击查看详情"` | 🟠 卡片正文 |
+| `sound` | `false` | 弹卡片时是否播提示音 |
+| `rootOnly` | `true` | 只通知顶层会话；`false` 时子代理完成也通知 |
+| `autoDismissSec` | `0` | 自动消失秒数（`0` = 常驻） |
+| `title` | `"DeepSeek Harness"` | 拿不到会话名时的兜底标题 |
+| `socketPath` | `/tmp/dsh-notify-macos.sock` | 与守护进程通信的 socket |
+| `serverPath` | 包内 `bin/dsh-notify-server` | 守护进程路径 |
 
-## 平台要求
+## 出问题先看这几条
 
-- 仅 macOS（插件按 `process.platform === "darwin"` 判断）。
-- 守护进程需 Swift 5.9+ 编译（已随包提供预编译二进制）。
-- 踩坑记录见 [docs/troubleshooting.md](docs/troubleshooting.md)。
+| 症状 | 先检查 |
+| --- | --- |
+| 完全不弹卡 | `dsh web` 是否在跑；`cordis.patch.yml` 里是否注册了 `notify-macos`；改完 host 半区要**重启 `dsh web`**（不是热更新） |
+| 点卡片没反应 | 首次点击的 macOS 自动化授权是否点了「允许」；终端里 `log` 见 `docs/troubleshooting.md` §20 |
+| 抬起来的浏览器窗口不对 | 宿主窗口在别的桌面/被最小化时的分支行为，见 §20 / §22（§22 的探测机制已按 §23 简化） |
+| 琥珀卡片不自动消失 | 该行对应的授权/提问是否真在 GUI 里处理过（§24） |
+| 卡片莫名消失 / daemon 不见了 | daemon 会自愈重启；历史上"凭空消失"的根因是 SIGPIPE，见 §21 |
+| 想自己查状态 | 见 [docs/protocol.md](docs/protocol.md)：`ping` / `state` / `probe` / `debug` |
 
-## 同类项目与社区参考
+完整踩坑记录（每一条都有真实现场与修法）：[docs/troubleshooting.md](docs/troubleshooting.md)。
 
-本插件是独立开发的作品。联网调研确认社区已有多个功能相近的 DSH 通知插件，官方（deepseek-ai/deepseek-harness）暂未内置任务完成通知，但官方「一切皆插件」架构明确留白给社区。以下对比供后续迭代参考：
+**要给作者反馈问题时，附上这三样最有用**：
 
-| 项目 | 平台 | 通知形态 | 会话跳转 | 说明 |
-| --- | --- | --- | --- | --- |
-| 本插件 | macOS | 右上角自绘悬浮卡片（常驻/拖拽清除/品牌鲸鱼） | AppleScript 注入（localStorage + 侧边栏点击） | 不依赖改动前端即可跨会话跳转 |
-| [dsh-niao-message](https://github.com/dsh-niao/dsh-niao-message) | macOS | 系统通知中心横幅 | 点击直达应用（`open -a`） | 三大场景 + 回页面自动清空 + 防打扰 |
-| [TARS-snail/dsh-notify](https://github.com/TARS-snail/dsh-notify) | Linux/桌面 | 桌面通知 | — | **presence 检测**：仅用户离开会话时才通知 |
-| [dsh-notify-yimit](https://github.com/YiMlT/dsh-notify-yimit) | Windows | 系统通知 + WPF 自绘浮窗 | **URL hash 深链 + client half**（`#…/session=<id>` → `ctx.sessions.open`） | 与本品定位最接近；标题=会话名、多场景、常驻宿主 |
-| [hotpot-labs/dsh-notifier-plugin](https://github.com/hotpot-labs/dsh-notifier-plugin) | mac/win/linux | 浏览器 `Notification()` / Tauri | — | 轻量「只通知不交互」，多后端可插拔 |
-| [THEWOLFWALKER/dsh-notifier](https://github.com/THEWOLFWALKER/dsh-notifier) | 跨平台 | IM 推送 | — | 统一 `notify()` + 8 通道（telegram/bark/feishu…） |
-
-生态汇总清单：[awesome-deepseek-harness](https://github.com/Dominic789654/awesome-deepseek-harness) · [awesome-dsh-plugin](https://github.com/Anil-matcha/awesome-dsh-plugin) · [dshworks/awesome-dsh-plugins](https://github.com/dshworks/awesome-dsh-plugins)
-
-**最有价值的参考**：`dsh-notify-yimit` 的会话跳转走 **URL hash 深链 + 客户端 half**——由浏览器端监听 hash 后调用前端原生 `ctx.sessions.open(id)`。相比本品的 AppleScript 注入：无需 macOS 自动化权限、无需浏览器「Allow JavaScript from Apple Events」、天然无刷新、跨浏览器一致。代价是需要打包 `dsh.client` 客户端 half（社区插件已证明这是 DSH 一等公民机制）。若后续要"做正"跳转层，可优先吸收该方案，替换掉最脆弱的注入部分，同时保留本品的悬浮卡片形态。
-
-## 后续拓展（TODO feed）
-
-当前实现是"能跑的单体"，以下扩展点按价值排序，**等出现第二个消费者 / 跨平台需求时再逐个落地**，避免提前抽象：
-
-### 1. `BrowserDriver` 协议（最优先）
-现在 Safari 与 Chromium 家族（Chrome/Edge/Brave/Arc/Opera）的差异散落在 `probeScript` / `injectScript` 的 if/else 里。抽成协议后，浏览器列表变为驱动注册表，新浏览器只需注册一个驱动：
-
-```swift
-protocol BrowserDriver {
-    var displayName: String { get }
-    func findTab(matching url: String) -> Bool
-    func evaluateJavaScript(_ script: String) -> Result<String, Error>
-    func activate()
-}
-struct SafariDriver: BrowserDriver { ... }     // AppleScript "Safari" 方言
-struct ChromiumDriver: BrowserDriver { ... }   // 共享，仅 appName 参数化
+```bash
+printf '{"cmd":"state"}\n' | nc -U /tmp/dsh-notify-macos.sock   # 当前卡片状态
+tail -50 /tmp/dsh-notify-macos.log                              # 守护进程日志
+sw_vers; uname -m; dsh --version                                # macOS / 架构 / DSH 版本
 ```
 
-### 2. `ScriptRunner`（进程/宿主抽象）
-现在硬编码 `/usr/bin/osascript`（`Process`）。同一跳转协议将来可跑在 `osascript -l JavaScript`（JXA）、进程内 `NSAppleScript`、或 **Firefox 的 DevTools Protocol**（Firefox 没有 AppleScript tab 注入，是当前唯一不支持的浏览器，RDP 是其出路）。抽协议后逻辑可 mock 可单测。
+## 它是怎么跑起来的（简略）
 
-### 3. `CompletionPresenter` 门面（渲染端策略化）
-渲染侧目前只有自绘悬浮卡片一种实现（+ 插件侧 osascript 兜底）。抽协议可支持 headless、日志模式、未来 Linux/Windows 通知：
-
-```swift
-protocol CompletionPresenter {
-    func present(_ request: ShowRequest)
-    func dismiss(id: String)
-}
 ```
-`NSWindow`/`NSScreen` 调用集中在实现里——真正的"OS 扩展点"。
+DSH host 进程（lib/index.js）
+  │  监听 turn/end、approval/asked、tool/call，归一成 completed / error / blocked
+  │  Unix socket 推一条 show 指令（带 sessionId、turn 位置锚点、blocked 行的关联键）
+  ▼
+dsh-notify-server（Swift/AppKit 守护进程，插件按需拉起）
+  │  在右上角画卡片；点击时用 AppleScript 把 GUI 标签页指向
+  │  http://127.0.0.1:3080/#dsh-notify-macos/session=<id>&turn=N
+  ▼
+client 半区（lib/client.js，跑在 GUI 页面里）
+     收到 hash → 调前端原生 sessions.open(id) → 滚到那个 turn 的完成处
+```
 
-### 4. 把 GUI 知识从守护进程剥离（协议演进方向）
-`inPlaceScript` 硬编码了 DSH 前端的 DOM 结构（`[role="treeitem"]`、`[data-conversation-scroll]`）。更干净的形态：**插件在 `show` 消息里下发跳转脚本/URL**，守护进程退化为纯执行器。好处：前端改版只改插件；守护进程可通用化服务其他 Harness。
+三个刻意的设计取舍，值得知道的只有这些：
 
-> **社区已验证的替代路径**：参考 [dsh-notify-yimit](https://github.com/YiMlT/dsh-notify-yimit) 的 **URL hash 深链 + client half** 方案——跳转由浏览器端监听 `#…/session=<id>` 后调用前端原生 `ctx.sessions.open(id)` 完成，守护进程完全不碰 DOM，也无需 macOS 自动化/浏览器 JS 授权。若重新设计跳转层，这是首选方向（详见上方「同类项目与社区参考」）。
+- **跳转不碰 DOM**：守护进程只负责把标签页指向一个 hash，页面里的 client 半区用前端原生 API 切会话（无需浏览器「允许 AppleScript 执行 JS」那种授权）；
+- **卡片持久化**：卡栈原子写进 `<socketPath>.cards.json`，daemon 重启/崩溃后未处理的卡片自动回来；
+- **不猜"你看见没有"**：只判定"跳转有没有交给浏览器"，交出去了才消除卡片，否则保留可重试（细节与教训见 §20/§23）。
 
-### 5. 协议层现代化
-- `show` 的 `cmd` 字段冗余（switch 后构造恒为 "show"）
-- 手拼 JSON 回复 → Codable 枚举 + 类型化回复
-- 增加协议 `version` 字段，支持平滑迁移
+更多设计文档：[docs/l2-swiftpm-split.md](docs/l2-swiftpm-split.md)（Core/服务端分层）、[docs/roadmap.md](docs/roadmap.md)（后续拓展与同类项目对比）。
 
-### 6. 进程生命周期管理（守护进程探活）
-守护进程由插件 detached spawn，插件只在加载时 pre-warm 一次，不周期性探活。可加：守护进程心跳上报 / 插件定时 ping 失败自动重启 / 退出时清理 socket。
+## 开发与测试
 
+```bash
+swift build -c release            # 编译守护进程
+cp .build/release/dsh-notify-server bin/   # 产物就位（serverPath 默认指向这里）
+
+npm test                          # host/client 纯逻辑（vitest，48 条）
+./test/socket-smoke.sh            # daemon 协议冒烟（24 条，含竞态与 SIGPIPE 断言）
+./test/core-local-check.sh        # Core 不变量自检（swiftc 直编，无需 XCTest）
+./test/typecheck-swift-tests.sh   # XCTest 源码类型检查（桩模块，无需 XCTest）
+swift test                        # 完整 XCTest（需含 XCTest 的 Xcode 工具链）
+npm run test:e2e                  # client 半区 Playwright（自带 harness 页）
+```
+
+CI（`.github/workflows/tests.yml`）：ubuntu 跑 vitest + Playwright，macos-15 跑 `swift test` + Core 自检 + 真 socket 集成测试。
+
+## 平台与许可
+
+- 仅 macOS。守护进程用 Swift 5.9+ / SwiftPM 编译；仓库内附 Apple Silicon 预编译二进制。
+- MIT，见 [LICENSE](LICENSE)。改动记录见 [CHANGELOG.md](CHANGELOG.md)。
