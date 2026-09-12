@@ -1150,6 +1150,12 @@ final class CardStack {
                 dshLog("[cards] skipping expired card \(sc.sessionTitle)\n")
                 continue
             }
+            guard !sc.entries.isEmpty else {
+                // A row-less card has nothing to show or click; older builds
+                // could persist one when a relayout happened mid-dismiss.
+                dshLog("[cards] skipping empty card \(sc.sessionTitle)\n")
+                continue
+            }
             let card = NotificationCard(
                 sessionId: sc.sessionId,
                 sessionTitle: sc.sessionTitle,
@@ -1196,12 +1202,18 @@ final class CardStack {
     /// Persist the current stack (no-op while restoring or without a store).
     private func persist() {
         guard let store, !restoring else { return }
-        guard !cards.isEmpty else {
-            // Empty stack: remove the file instead of leaving an empty snapshot.
+        // A card that is flying out is already gone as far as the user is
+        // concerned; it is only still in `cards` so the animation can finish.
+        // Persisting it recorded a rowless card that came back as a weird empty
+        // card after a restart (and a relayout during the animation made that
+        // reproducible). Same reasoning as relayout skipping it.
+        let live = cards.filter { !$0.isDismissing }
+        guard !live.isEmpty else {
+            // Nothing worth keeping: remove the file instead of an empty snapshot.
             store.clear()
             return
         }
-        let snapshot = CardStackSnapshot(cards: cards.map { card in
+        let snapshot = CardStackSnapshot(cards: live.map { card in
             SnapshotCard(
                 sessionId: card.sessionId,
                 sessionTitle: card.sessionTitle,

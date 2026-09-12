@@ -149,6 +149,10 @@ if ! echo "$R" | grep -q CONN-ERR; then
 else
   bad "blocked frames failed: $R"
 fi
+for _ in $(seq 1 15); do
+  grep -q '"ref" : "approval:r1"' "$CARDS" 2>/dev/null && break
+  sleep 0.2
+done
 if grep -q '"ref" : "approval:r1"' "$CARDS" 2>/dev/null; then
   ok "blocked correlation key persisted in the snapshot"
 else
@@ -238,6 +242,30 @@ if [ "$(jget "$S4" cards)" = "7" ] && [ "$(jget "$S4" entries)" = "8" ]; then
   ok "race cards cleaned up (stack back to baseline)"
 else
   bad "race cleanup left the stack at: $S4"
+fi
+
+# --- 飞行期间发生 relayout，快照里不得出现 0 行的空卡 ---
+# （卡片飞出时仍留在栈里；此时任何 relayout 都会触发 persist，旧实现会把
+#   这张已经被点空、正在飞走的卡写进快照，重启后变成一张空卡）
+py '[{"cmd":"show","kind":"completed","sessionId":"smoke-empty","sessionTitle":"EMPTY","message":"solo","ref":"empty:a","sound":false}]' >/dev/null
+py '[{"cmd":"clear","sessionId":"smoke-empty","ref":"empty:a"}]' >/dev/null       # 0 行 → 开始飞出
+py '[{"cmd":"show","kind":"completed","sessionId":"smoke-other","sessionTitle":"OTHER","message":"trigger-relayout","ref":"other:b","sound":false}]' >/dev/null
+sleep 0.8
+if grep -q '"sessionId" : "smoke-empty"' "$CARDS" 2>/dev/null; then
+  bad "a rowless card was persisted during the dismiss flight"
+else
+  ok "no rowless card in the snapshot (mid-dismiss relayout)"
+fi
+py '[{"cmd":"clear","sessionId":"smoke-other","ref":"other:b"}]' >/dev/null
+for _ in $(seq 1 15); do
+  S5=$(py '[{"cmd":"state"}]')
+  [ "$(jget "$S5" cards)" = "7" ] && [ "$(jget "$S5" entries)" = "8" ] && break
+  sleep 0.3
+done
+if [ "$(jget "$S5" cards)" = "7" ] && [ "$(jget "$S5" entries)" = "8" ]; then
+  ok "mid-dismiss relayout left the stack at baseline"
+else
+  bad "stack after mid-dismiss relayout: $S5"
 fi
 
 # --- persistence: cards must survive a daemon restart ---
