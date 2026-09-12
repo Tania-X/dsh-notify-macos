@@ -190,17 +190,26 @@ public enum JumpPolicy {
     }
 
     /// Slack when matching a window reported by AppleScript against the
-    /// on-screen window list: the two APIs do not always agree to the pixel
-    /// (title-bar/shadow rounding), and an exact match would make us escalate
-    /// for nothing.
-    public static let windowBoundsTolerance: Double = 8
+    /// on-screen window list: the two APIs may round differently, so an EXACT
+    /// match would make us escalate for nothing.
+    ///
+    /// Kept deliberately tight — a loose tolerance would let a DIFFERENT window
+    /// of the same browser (two same-sized windows side by side, or one almost
+    /// covering the other) pass as the hosting window, which reports "visible"
+    /// and drops the card over a jump the user never saw. That is the very
+    /// defect the window-level check exists to prevent (AI review, severity 4).
+    public static let windowBoundsPositionTolerance: Double = 4
+    /// Size must agree almost exactly: size is what distinguishes windows.
+    public static let windowBoundsSizeTolerance: Double = 2
 
     /// Whether two window frames describe the same window.
     public static func boundsMatch(
-        _ a: WindowBounds, _ b: WindowBounds, tolerance: Double = windowBoundsTolerance
+        _ a: WindowBounds, _ b: WindowBounds,
+        positionTolerance: Double = windowBoundsPositionTolerance,
+        sizeTolerance: Double = windowBoundsSizeTolerance
     ) -> Bool {
-        abs(a.x - b.x) <= tolerance && abs(a.y - b.y) <= tolerance
-            && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+        abs(a.width - b.width) <= sizeTolerance && abs(a.height - b.height) <= sizeTolerance
+            && abs(a.x - b.x) <= positionTolerance && abs(a.y - b.y) <= positionTolerance
     }
 
     /// Whether the window with `host` bounds is among the windows the system

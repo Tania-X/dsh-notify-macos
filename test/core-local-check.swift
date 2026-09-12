@@ -138,13 +138,22 @@ checkEqual(twinModel.removeCompletion(matching: secondTwin)?.detail, "E2", "iden
 // --- 窗口级可见性：应用在前台 ≠ 宿主窗口在你眼前 ---
 let hostWindow = JumpPolicy.WindowBounds(x: 0, y: 25, width: 1440, height: 875)
 let otherWindow = JumpPolicy.WindowBounds(x: 240, y: 120, width: 900, height: 600)
-check(JumpPolicy.boundsMatch(hostWindow, JumpPolicy.WindowBounds(x: 3, y: 22, width: 1443, height: 878)),
-      "bounds match tolerates sub-pixel/titlebar differences")
+check(JumpPolicy.boundsMatch(hostWindow, JumpPolicy.WindowBounds(x: 2, y: 26, width: 1442, height: 876)),
+      "bounds match tolerates rounding-level differences (<=2px size, <=4px position)")
 check(!JumpPolicy.boundsMatch(hostWindow, otherWindow), "different windows never match")
 check(JumpPolicy.isWindowOnScreen(hostWindow, among: [otherWindow, hostWindow]),
       "hosting window found among on-screen windows")
 check(!JumpPolicy.isWindowOnScreen(hostWindow, among: [otherWindow]),
       "another window of the same app on screen does NOT count as the hosting window")
+// 同尺寸但错位的两个窗口不算同一个（容差必须紧到不会把邻居认成宿主窗口）
+let shiftedSameSize = JumpPolicy.WindowBounds(x: 12, y: 25, width: 1440, height: 875)
+check(!JumpPolicy.boundsMatch(hostWindow, shiftedSameSize),
+      "same-size window shifted beyond the position tolerance does NOT match")
+check(JumpPolicy.boundsMatch(hostWindow, JumpPolicy.WindowBounds(x: 1, y: 26, width: 1441, height: 874)),
+      "rounding-level differences (<=2px) still match")
+let slightlySmaller = JumpPolicy.WindowBounds(x: 0, y: 25, width: 1430, height: 875)
+check(!JumpPolicy.boundsMatch(hostWindow, slightlySmaller),
+      "a visibly different window size does NOT match")
 check(!JumpPolicy.isWindowOnScreen(hostWindow, among: []),
       "no on-screen windows at all = hosting window is not visible")
 

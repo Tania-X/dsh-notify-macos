@@ -359,6 +359,14 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 
 **测试**：`JumpPolicy.boundsMatch` / `isWindowOnScreen` 的 XCTest 与 `test/core-local-check.sh` 断言（含「同一 App 的另一个窗口在屏**不算**宿主窗口可见」这条关键用例）；冒烟 10/10。
 
+### 22.2 容差必须紧到认不出「邻居窗口」
+
+第一版给四项（x/y/w/h）都留了 8px 容差。评审指出：**同一浏览器两个尺寸相近、位置相近的窗口**（并排轻微错位、或一个几乎盖住另一个）会被误判成宿主窗口 → `isWindowOnScreen` 返回 true → 判「可见」→ 卡片被消除，而用户眼前其实是另一个窗口 —— 又是本次要修的缺陷的另一种触发路径。评审判 [4]，判得对。
+
+改成分级判定：**尺寸是区分窗口的关键，容差压到 2px；位置允许 4px** 的舍入差异。断言相应覆盖三种情况：舍入级差异（≤2px/≤4px）仍匹配；**同尺寸但错位超过容差的不匹配**；**尺寸明显不同（哪怕位置一致）也不匹配**。
+
+同轮还顺手修了它指出的 [2]：Chromium 方言里 `execute javascript` 失败会回退 `open location`（URL 可能落到**另一个** App），但脚本仍无条件 `return bounds of hostWindow` —— 那会把「原窗口的 bounds」当成宿主窗口来匹配。现在回退分支返回 `missing value`，上层解析成 `unknown` 并按未知处理（升级 + 应用级兜底）。
+
 ### 22.1 一轮评审后的修正：`nil`（未知）不等于「可见」
 
 第一版把三态写成了 `shown != false`，等于**把「未知」当成「在屏」**：AppleScript 取不到 bounds（解析失败、或窗口不可见时取不到有效值 —— 恰恰最可能发生在窗口在别的 Space / 被最小化时）时，既不升级、又直接 `visible = true`，于是**又回到「卡片被消除但用户什么也没看到」**。评审判 [4]，判得对。

@@ -1019,7 +1019,11 @@ enum BrowserJumper {
               try
                 execute targetTab javascript \(asString("location.href = \(asString(targetURL));"))
               on error
+                -- Fallback: the URL goes to whatever the system opens, which may
+                -- be a DIFFERENT app, so this window's bounds no longer describe
+                -- where the GUI ended up -> report "unknown" to the caller.
                 open location \(asString(targetURL))
+                return missing value
               end try
               return bounds of hostWindow
             end tell

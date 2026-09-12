@@ -74,6 +74,16 @@ final class JumpPolicyTests: XCTestCase {
         XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 100, y: 50, width: 900, height: 800)))
     }
 
+    func testBoundsToleranceIsTooTightToConfuseNeighbourWindows() {
+        let host = JumpPolicy.WindowBounds(x: 0, y: 25, width: 1440, height: 875)
+        // A same-sized window shifted a few pixels is a DIFFERENT window.
+        XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 12, y: 25, width: 1440, height: 875)))
+        // A different-sized window in the same place is a different window too.
+        XCTAssertFalse(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 0, y: 25, width: 1430, height: 875)))
+        // Rounding-level disagreement is still accepted.
+        XCTAssertTrue(JumpPolicy.boundsMatch(host, JumpPolicy.WindowBounds(x: 1, y: 26, width: 1441, height: 874)))
+    }
+
     func testUnknownWindowStateIsNotTreatedAsVisible() {
         // `nil` (browser could not report the window frame) tends to happen
         // exactly when the window is minimized/off-Space, so it must escalate
