@@ -1,0 +1,26 @@
+# 本文件随包发布，是 DSH 的 "bundle layer"：package.json 里声明
+#   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+# 之后，`dsh plugin --profile web add <本包>` 就会自动把这条 insert 加进 profile 的层栈 ——
+# 用户不需要再手工编辑 profile 的 cordis.patch.yml。
+#
+# 想改配置时**不要改这里**（升级会被覆盖）：在 profile 自己的 cordis.patch.yml 里按 id 覆盖即可
+# （用户层永远在 bundle 层之后应用）：
+#
+#   - id: notify-macos
+#     config:
+#       socketPath: /tmp/dsh-notify-macos.sock
+#
+- insert:
+    - id: notify-macos
+      name: dsh-notify-macos
+      config:
+        enabled: true
+        title: DeepSeek Harness
+        messageCompleted: 任务已完成
+        messageError: 任务失败，点击查看详情
+        messageBlocked: 需要你处理，点击查看详情
+        sound: false
+        rootOnly: true
+        clickAction: jump-web
+        webUrl: http://127.0.0.1:3080
+        autoDismissSec: 0

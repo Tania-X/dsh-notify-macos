@@ -26,35 +26,33 @@ DeepSeek Harness（DSH）的 macOS 通知插件：任务一结束，就在屏幕
 前置：macOS（插件只支持 macOS）+ 已经在用 DSH 的 web profile（`dsh web`）。
 
 ```bash
-# 1) 装进 web profile（pnpm 模式，与 dsh 官方插件一致）
-git clone https://github.com/Tania-X/dsh-notify-macos.git
-dsh plugin --profile web add /path/to/dsh-notify-macos
-#    也可以直接： dsh plugin --profile web add github:Tania-X/dsh-notify-macos
+# 一条命令：装进 web profile 并自动激活（包内声明了 dsh.bundle）
+dsh plugin --profile web add github:Tania-X/dsh-notify-macos
 
-# 2) 注册插件（config 可整段照抄，字段见下面的「配置」）
-$EDITOR "$DSH_HOME/profiles/web/cordis.patch.yml"
-```
-
-```yaml
-# $DSH_HOME/profiles/web/cordis.patch.yml
-- insert:
-    - id: notify-macos
-      name: dsh-notify-macos
-      config:
-        enabled: true
-        clickAction: jump-web
-        webUrl: http://127.0.0.1:3080
-        # 默认是 $TMPDIR/dsh-notify-macos.sock；钉到 /tmp 只是为了
-        # 排查时手敲命令方便（$TMPDIR 是 /var/folders/… 那种长路径）
-        socketPath: /tmp/dsh-notify-macos.sock
-        # 默认就是包内路径，一般不用写；写了要指到真正装好的位置：
-        serverPath: /Users/<你>/.dsh/profiles/web/node_modules/dsh-notify-macos/bin/dsh-notify-server
-```
-
-```bash
-# 3) 重启 dsh，然后让它完成一个小任务试试
+# 然后重启 dsh，让它完成一个小任务试试
 dsh web
 ```
+
+**不需要手工编辑任何 patch 文件**：包内自带 `cordis.patch.yml`，`dsh plugin add` 会把它并进
+profile 的层栈。装完可以这样确认：
+
+```bash
+dsh --profile web --dump-config | grep -A 3 notify-macos   # 应看到 notify-macos 条目
+```
+
+> **想改配置**（换 socket 路径、关掉提示音等）不用动包里的文件，在 **profile 自己的**
+> `cordis.patch.yml` 里按 id 覆盖即可（用户层永远在 bundle 层之后应用）：
+> ```yaml
+> # $DSH_HOME/profiles/web/cordis.patch.yml
+> - id: notify-macos
+>   config:
+>     socketPath: /tmp/dsh-notify-macos.sock
+> ```
+> 只写你要改的字段即可，其余走插件自身的默认值；可覆盖的字段见下面的「配置」。
+>
+> ⚠️ 这个文件必须是**顶层 YAML 数组**：想临时关掉所有覆盖时请保留最后一行的 `[]`，
+> 不要留成"只有注释"的空文件 —— 那样解析成 `null`，`dsh` 会因为
+> `must be a top-level YAML array of loader patch entries` 直接启动失败（实测踩过）。
 
 **装好了怎么确认**
 
