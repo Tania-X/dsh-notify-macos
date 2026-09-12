@@ -308,4 +308,20 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 2. **托管窗口取消最小化**：AppleScript 找到目标窗口后先 `if miniaturized of hostWindow then set miniaturized of hostWindow to false`（Chromium 方言用 `try … end try` 包住），再切标签、置顶窗口 —— 最小化的窗口“跳成功了也看不见”。
 3. **不可见就不吞卡片**：`BrowserJumper.jump` 现在返回“用户能不能看见”（`JumpPolicy.isVisibleToUser(navigated:browserIsFrontmost:)`）；`performAction` 与点击回调把它传回主线程，**只有确认可见才 dismiss 卡片/删掉那一行**，否则保留（日志 `[cards] jump not visible; row N kept so it can be retried`）。卡片不再因为一次看不见的跳转而消失。
 
-**取舍与验证**：弱激活（不打扰其它 Space）仍是首选，只有确认失败才升级；`JumpPolicy.activationSettleSeconds = 0.75s` 给激活留出轮询窗口但不会卡住 UI。socket `debug` 命令的回复现在带 `{"ok":true,"visible":false}`，可以在不打卡片的情况下直接验证这条链路（前台 App 状态由 `frontmost→escalated→visible` 三段日志给出）。
+**取舍与验证**：弱激活（不打扰其它 Space）仍是首选，只有确认失败才升级；`JumpPolicy.activationSettleSeconds = 0.75s` 给激活留出轮询窗口但不会卡住 UI。socket `debug` 命令的回复现在带 `{"ok":true,"outcome":"visible|unconfirmed|notApplicable","visible":true|false}`，可以在不打卡片的情况下直接验证这条链路（前台 App 状态由 `frontmost→escalated→visible` 三段日志给出）。
+
+### 20.1 一轮评审后的修正：三态语义 + 按身份删行
+
+第一版把「用户能不能看见」直接做成 `Bool`，被 AI 审查判为 **[4] 严重**：**若干路径无条件返回 true** —— `sessionId` 缺失的早退只调了 `NSWorkspace.open` 就返回 true；`open-folder` / `open-web` / `default` 分支同样恒 true。这些路径**从未做过前台校验**，却向调用方报告“可见”，于是卡片照旧被 dismiss —— 与本次要修的「假成功」是同一类问题。
+
+**改法（三态，纯策略在 Core 可测）**：
+
+| 结果 | 含义 | 卡片/行 |
+| --- | --- | --- |
+| `visible` | 动作执行了，且确认用户看得见（浏览器已在前台/被抬到前台） | 丢弃 |
+| `unconfirmed` | 试过了但**确认不了**可见性 | **保留**（可重试） |
+| `notApplicable` | 与“位置跳转”无关（无 sessionId 只打开 GUI 根地址、纯本地动作） | 丢弃（与旧行为一致） |
+
+`JumpPolicy.shouldDismissCard(after:)` 就是这条规则（只有 `unconfirmed` 保留），`open-folder` / `open-web` 也改成**先确认前台**（Finder / 任一浏览器）再返回，不再假装成功。
+
+**另一处（[2] 轻微，但窗口是我这次引入的）**：把行删除改成异步回调后，回调里的 `row` 行号可能已经陈旧 —— 两次快速点击不同行、回调乱序返回时，会删掉**相邻**那一行。改成**按身份删除**：点击时抓下该行的 `CompletionEntry`，回调里用 `CardModel.index(of:)` / `removeCompletion(matching:)` 按 `message+kind+time` 重新定位，找不到就当作“已被另一次点击处理”跳过。XCTest 与 `test/core-local-check.sh` 都覆盖了「先前删掉一行后按身份删仍删对行」。

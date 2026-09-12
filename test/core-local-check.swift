@@ -95,6 +95,37 @@ do {
     check(false, "legacy fixture setup threw: \(error)")
 }
 
+// --- 点击结果三态：只有 unconfirmed 才保留卡片 ---
+check(JumpPolicy.shouldDismissCard(after: .visible), "visible outcome dismisses the card")
+check(JumpPolicy.shouldDismissCard(after: .notApplicable), "notApplicable (no position jump) dismisses")
+check(!JumpPolicy.shouldDismissCard(after: .unconfirmed), "unconfirmed keeps the card for a retry")
+check(
+    JumpPolicy.isVisibleToUser(navigated: true, browserIsFrontmost: false) == false,
+    "navigated but browser not frontmost is NOT visible"
+)
+check(
+    JumpPolicy.shouldEscalateActivation(browserIsFrontmost: false)
+        && !JumpPolicy.shouldEscalateActivation(browserIsFrontmost: true),
+    "activation escalates only when the browser did not come forward"
+)
+
+// --- 行删除按身份：并发点击下不会删错行 ---
+let rowModel = CardModel()
+let ta = Date(timeIntervalSince1970: 1_700_000_000)
+let tb = Date(timeIntervalSince1970: 1_700_000_060)
+rowModel.addCompletion(message: "a", kind: .completed, detail: nil, at: ta, turn: 104)
+rowModel.addCompletion(message: "b", kind: .completed, detail: nil, at: tb, turn: 98)
+rowModel.addCompletion(message: "c", kind: .completed, detail: nil, at: tb, turn: 60)
+let clickedRow = rowModel.entries[2]
+_ = rowModel.removeCompletion(index: 1)          // 另一次点击先删掉了 row 1
+checkEqual(rowModel.index(of: clickedRow), 2, "identity lookup follows the shifted row")
+checkEqual(rowModel.removeCompletion(matching: clickedRow)?.message, "c", "identity removal deletes the clicked row")
+checkEqual(rowModel.entries.map(\.message), ["b"], "only the clicked row is gone")
+check(
+    rowModel.removeCompletion(matching: clickedRow) == nil,
+    "removing an already-gone row is a no-op"
+)
+
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
 checkEqual(
     JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "abc", turn: 60),

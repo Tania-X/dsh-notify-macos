@@ -177,11 +177,28 @@ final class NotificationCard: NSObject {
         model.jumpTurn(forRow: row, cardTurn: turn)
     }
 
+    /// The completion behind a 1-based row (nil when out of range) — used to
+    /// identify the clicked row across the async jump that follows a click.
+    func entry(atRow row: Int?) -> CompletionEntry? {
+        guard let row, row >= 1, row <= entries.count else { return nil }
+        return entries[row - 1]
+    }
+
     /// Remove one completion by its 1-based arrival index (state in the
     /// model; re-stacks here). Returns the removed entry, or nil.
     @discardableResult
     func removeCompletion(index: Int) -> CompletionEntry? {
         let removed = model.removeCompletion(index: index)
+        updateFrame()
+        return removed
+    }
+
+    /// Remove the row matching `entry` — identity-based, so an async click
+    /// callback cannot delete the wrong row after another removal shifted the
+    /// indices. Returns the removed entry, or nil when it is already gone.
+    @discardableResult
+    func removeCompletion(matching entry: CompletionEntry) -> CompletionEntry? {
+        let removed = model.removeCompletion(matching: entry)
         updateFrame()
         return removed
     }
@@ -226,18 +243,25 @@ final class NotificationCard: NSObject {
     /// Card clicks always deep-link to the card's session (blocked included:
     /// its pending approval/ask lives at that session's newest message). The
     /// `focusOnly` switch is retained solely for the socket `debug` command.
-    func performAction(focusOnly: Bool = false, turn turnOverride: Int? = nil) -> Bool {
+    func performAction(
+        focusOnly: Bool = false, turn turnOverride: Int? = nil
+    ) -> JumpPolicy.JumpOutcome {
         switch action {
         case "open-folder":
             if let path, !path.isEmpty {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+                // Revealing in Finder is only *visible* if Finder came forward;
+                // otherwise report unconfirmed so the card is kept for a retry
+                // instead of vanishing over a no-op (AI review, severity 4).
+                return BrowserJumper.confirmFrontmost(bundleId: "com.apple.finder")
             }
-            return true
+            return .unconfirmed
         case "open-web":
             if let url, let parsed = URL(string: url) {
                 NSWorkspace.shared.open(parsed)
+                return BrowserJumper.confirmFrontmostBrowser()
             }
-            return true
+            return .unconfirmed
         case "jump-web":
             // Jump the browser to this completion's own position: an aggregated
             // card gives every row its own anchor, so row N scrolls to the turn
@@ -249,7 +273,9 @@ final class NotificationCard: NSObject {
                 turn: turnOverride ?? turn, focusOnly: focusOnly
             )
         default:
-            return true
+            // No browser/UX action at all: nothing to confirm, dismissing is
+            // the (unchanged) expected behaviour.
+            return .notApplicable
         }
     }
 
@@ -537,9 +563,9 @@ final class CardView: NSView {
     /// Focus-only would leave the GUI on whichever session is active (the
     /// "newest" one) and miss the pending session entirely.
     private func jumpAndDismiss(_ card: NotificationCard) {
-        jump(card) { [weak card] visible in
+        jump(card) { [weak card] outcome in
             guard let card else { return }
-            if visible {
+            if JumpPolicy.shouldDismissCard(after: outcome) {
                 card.dismiss()
             } else {
                 // The user never saw a jump: keeping the card (instead of
@@ -554,30 +580,39 @@ final class CardView: NSView {
     /// BLOCKED rows deep-link to their session like any other; removing the
     /// row just marks it handled.
     private func jumpAndRemoveRow(_ card: NotificationCard, row: Int) {
-        jump(card, turn: card.jumpTurn(forRow: row)) { [weak card] visible in
+        // Capture the ROW IDENTITY, not its index: the callback runs after an
+        // async browser jump, by which time another click may already have
+        // removed a row and shifted the indices.
+        guard let clicked = card.entry(atRow: row) else { return }
+        jump(card, turn: card.jumpTurn(forRow: row)) { [weak card] outcome in
             guard let card else { return }
-            guard visible else {
+            guard JumpPolicy.shouldDismissCard(after: outcome) else {
                 dshLog("[cards] jump not visible; row \(row) kept so it can be retried\n")
                 return
             }
-            Self.removeRowAndRestack(card, row: row)
+            Self.removeRowAndRestack(card, matching: clicked)
         }
     }
 
-    /// Remove one row and re-stack; the last removed row dismisses the card.
-    private static func removeRowAndRestack(_ card: NotificationCard, row: Int) {
-        let removed = card.removeCompletion(index: row)
-        if removed != nil {
-            if card.completionCount == 0 {
-                // Last row handled: animate out (onRemoved → CardStack.remove).
-                // No relayout here — the card is still in the stack until the
-                // animation ends, and relayouting it mid-dismiss would yank it
-                // back into the stack position.
-                card.dismiss()
-            } else {
-                // Rows remain: re-stack under the new (shorter) frame.
-                card.onToggleExpanded?(card)
-            }
+    /// Remove the clicked row (by identity) and re-stack; removing the last row
+    /// dismisses the card.
+    private static func removeRowAndRestack(
+        _ card: NotificationCard, matching entry: CompletionEntry
+    ) {
+        guard card.removeCompletion(matching: entry) != nil else {
+            // Already handled by an overlapping click: nothing left to do.
+            dshLog("[cards] clicked row already removed; nothing to do\n")
+            return
+        }
+        if card.completionCount == 0 {
+            // Last row handled: animate out (onRemoved → CardStack.remove).
+            // No relayout here — the card is still in the stack until the
+            // animation ends, and relayouting it mid-dismiss would yank it
+            // back into the stack position.
+            card.dismiss()
+        } else {
+            // Rows remain: re-stack under the new (shorter) frame.
+            card.onToggleExpanded?(card)
         }
     }
 
@@ -586,7 +621,7 @@ final class CardView: NSView {
     /// the jump (card removal keys off that answer).
     private func jump(
         _ card: NotificationCard, focusOnly: Bool = false, turn: Int? = nil,
-        completion: ((Bool) -> Void)? = nil
+        completion: ((JumpPolicy.JumpOutcome) -> Void)? = nil
     ) {
         let action = card.action
         let run = { card.performAction(focusOnly: focusOnly, turn: turn) }
@@ -600,12 +635,11 @@ final class CardView: NSView {
         }
         if action == "jump-web" {
             DispatchQueue.global(qos: .userInitiated).async {
-                let visible = run()
-                DispatchQueue.main.async { completion?(visible) }
+                let outcome = run()
+                DispatchQueue.main.async { completion?(outcome) }
             }
         } else {
-            let visible = run()
-            completion?(visible)
+            completion?(run())
         }
     }
 }
@@ -950,12 +984,16 @@ enum BrowserJumper {
     static func jump(
         url: String?, sessionId: String?, sessionTitle: String?, turn: Int? = nil,
         focusOnly: Bool = false
-    ) -> Bool {
+    ) -> JumpPolicy.JumpOutcome {
         dshLog("[jump] start focusOnly=\(focusOnly) url=\(url ?? "nil") sessionId=\(sessionId ?? "nil") title=\(sessionTitle ?? "nil")\n")
         let guiUrl = (url?.isEmpty == false) ? url! : guiBaseUrl
         guard let sessionId, !sessionId.isEmpty else {
+            // Nothing to jump to: this only opens the GUI root. It is not a
+            // position jump, so the card may be dismissed as before — but say
+            // what actually happened instead of claiming a visible jump.
             if let parsed = URL(string: guiUrl) { NSWorkspace.shared.open(parsed) }
-            return true
+            dshLog("[jump] no sessionId: opened \(guiUrl) (not a position jump)\n")
+            return .notApplicable
         }
         let base = (url?.isEmpty == false) ? url! : guiBaseUrl
         let target = JumpLink.url(base: base, sessionId: sessionId, turn: turn)
@@ -1005,8 +1043,9 @@ enum BrowserJumper {
                             "[jump] tab updated but \(app) never came forward —"
                             + " the user did not see the jump; card kept for a retry\n"
                         )
+                        return .unconfirmed
                     }
-                    return visible
+                    return .visible
                 case .denied:
                     sawDenied = true   // transient? try the whole pass again
                     sawDeniedAnyPass = true
@@ -1041,9 +1080,9 @@ enum BrowserJumper {
             if let first = order.first {
                 let visible = bringBrowserForward(first)
                 dshLog("[jump] surfaced \(first) instead (visible=\(visible))\n")
-                return visible
+                return visible ? .visible : .unconfirmed
             }
-            return false
+            return .unconfirmed
         }
 
         // Clean pass: browsers were reachable but no tab hosts the GUI, i.e. the
@@ -1063,19 +1102,46 @@ enum BrowserJumper {
             // itself: give it a moment and report what the user sees.
             let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
             while Date() < deadline {
-                if let front = frontmostBundleId(),
-                   BrowserCatalog.families.contains(where: { family in
-                       family.channels.contains { $0.bundleId == front }
-                   }) {
-                    return true
-                }
+                if isFrontmostABrowser() { return .visible }
                 Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
             }
-            return false
+            return .unconfirmed
         } catch {
             dshLog("[jump] open failed: \(error)\n")
-            return false
+            return .unconfirmed
         }
+    }
+
+    /// Whether a catalogued browser is frontmost right now.
+    static func isFrontmostABrowser() -> Bool {
+        guard let front = frontmostBundleId() else { return false }
+        return BrowserCatalog.families.contains { family in
+            family.channels.contains { $0.bundleId == front }
+        }
+    }
+
+    /// Confirm an app came to the front, polling for the activation to settle.
+    /// Used by the non-jump actions (`open-folder`) so they report visibility
+    /// instead of an unconditional success.
+    static func confirmFrontmost(bundleId: String) -> JumpPolicy.JumpOutcome {
+        let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
+        while Date() < deadline {
+            if frontmostBundleId() == bundleId { return .visible }
+            Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
+        }
+        dshLog("[confirm] \(bundleId) never came forward; reporting unconfirmed\n")
+        return .unconfirmed
+    }
+
+    /// Same, for "a browser came forward" (used by the plain-URL open action).
+    static func confirmFrontmostBrowser() -> JumpPolicy.JumpOutcome {
+        let deadline = Date().addingTimeInterval(JumpPolicy.activationSettleSeconds)
+        while Date() < deadline {
+            if isFrontmostABrowser() { return .visible }
+            Thread.sleep(forTimeInterval: JumpPolicy.activationPollSeconds)
+        }
+        dshLog("[confirm] no browser came forward; reporting unconfirmed\n")
+        return .unconfirmed
     }
 }
 
@@ -1414,13 +1480,23 @@ final class SocketServer {
             let sessionTitle = object["sessionTitle"] as? String
             let focusOnly = (object["focusOnly"] as? Bool) ?? false
             let turn = object["turn"] as? Int
-            let visible = BrowserJumper.jump(
+            let outcome = BrowserJumper.jump(
                 url: url, sessionId: sessionId, sessionTitle: sessionTitle,
                 turn: turn, focusOnly: focusOnly
             )
-            // `visible` tells the caller whether the browser actually came
-            // forward — the same signal the card uses to decide keep-vs-dismiss.
-            reply("{\"ok\":true,\"visible\":\(visible)}\n")
+            // Mirrors exactly what a card click concludes: `visible` = the user
+            // should have seen it, so the card is dropped; `unconfirmed` keeps
+            // the card for a retry.
+            let label: String
+            switch outcome {
+            case .visible: label = "visible"
+            case .unconfirmed: label = "unconfirmed"
+            case .notApplicable: label = "notApplicable"
+            }
+            reply(
+                "{\"ok\":true,\"outcome\":\"\(label)\""
+                + ",\"visible\":\(outcome == .visible)}\n"
+            )
         default:
             break
         }

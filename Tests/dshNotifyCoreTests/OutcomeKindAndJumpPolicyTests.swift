@@ -55,6 +55,16 @@ final class JumpPolicyTests: XCTestCase {
         XCTAssertLessThan(JumpPolicy.activationPollSeconds, JumpPolicy.activationSettleSeconds)
     }
 
+    func testOnlyUnconfirmedKeepsTheCard() {
+        // `visible` is done; `notApplicable` was never a position jump; only
+        // `unconfirmed` keeps the card so the click can be retried. (A bare
+        // Bool here previously let "no session id"/"open-folder" report success
+        // without ever checking anything — AI review, severity 4.)
+        XCTAssertTrue(JumpPolicy.shouldDismissCard(after: .visible))
+        XCTAssertTrue(JumpPolicy.shouldDismissCard(after: .notApplicable))
+        XCTAssertFalse(JumpPolicy.shouldDismissCard(after: .unconfirmed))
+    }
+
     func testShouldRetryOnlyWhenDeniedAndPassesRemain() {
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 1, sawDenied: true))
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 2, sawDenied: true))
