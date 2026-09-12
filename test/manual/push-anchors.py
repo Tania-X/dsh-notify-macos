@@ -20,13 +20,23 @@ import socket
 import sys
 
 
-def send(sock_path, payload):
+def send(sock_path, payload, expect_reply=True):
+    """Send one request line.
+
+    `show` is fire-and-forget by design (the daemon handles it on the main
+    thread and never writes a reply — see `processLine`), so waiting for one
+    just burns the timeout; only `state`/`ping` answer.
+    """
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(5)
+    s.settimeout(3 if expect_reply else 1)
     try:
         s.connect(sock_path)
         s.sendall(json.dumps(payload, ensure_ascii=False).encode())
-        return s.recv(4096).decode().strip()
+        if not expect_reply:
+            return "sent"
+        return s.recv(4096).decode().strip() or "(no reply)"
+    except socket.timeout:
+        return "timeout (no reply)"
     except Exception as exc:  # noqa: BLE001 - 诊断输出用
         return "ERR %s" % exc
     finally:
@@ -54,7 +64,7 @@ def main(argv):
             "message": message,
             "turn": turn,
             "sound": False,
-        })
+        }, expect_reply=False)
         print("turn=%-5d %s -> %s" % (turn, message, reply))
     print(send(sock_path, {"cmd": "state"}))
     return 0
