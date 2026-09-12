@@ -1327,6 +1327,11 @@ final class CardStack {
         guard let screen = NSScreen.main?.visibleFrame else { return }
         var y = screen.maxY - margin
         for card in cards {
+            // A card that is flying out must be left alone: it is still in the
+            // stack (it only leaves when the animation finishes), and re-stacking
+            // it here would yank it back to the top-right corner mid-flight —
+            // the user would see it fly out, snap back, then disappear.
+            guard !card.isDismissing else { continue }
             let frame = card.window.frame
             let targetOrigin = NSPoint(x: screen.maxX - frame.width - margin, y: y - frame.height)
             if animated {

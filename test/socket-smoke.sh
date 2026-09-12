@@ -188,7 +188,7 @@ else
 fi
 # 卡片是动画结束后才从栈里移除的：有界轮询而不是固定 sleep（固定等待在慢机器上会 flaky）
 S2=""
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in $(seq 1 15); do
   S2=$(py '[{"cmd":"state"}]')
   [ "$(jget "$S2" cards)" = "7" ] && [ "$(jget "$S2" entries)" = "8" ] && break
   sleep 0.3
@@ -213,20 +213,23 @@ else
 fi
 # 正在飞出时又来一条同会话完成 → 必须新建卡，不能被并进那张将死的卡
 py '[{"cmd":"show","kind":"completed","sessionId":"smoke-race","sessionTitle":"RACE","message":"after-dismiss","ref":"race:c","sound":false}]' >/dev/null
-RACE_CARDS=""
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+# 断言必须看**动画结束后**的状态：飞出中的卡片仍在栈里，所以窗口内的 cards 计数
+# 在修复前后都是 8（假阳性）。有区分度的是 entries ——
+#   修复后：新卡保留 → 8 卡 / 9 行（原卡的飞行结束后只剩新卡）
+#   未修复：并进将死的卡 → 动画结束整卡消失 → 7 卡 / 8 行
+for _ in $(seq 1 15); do
+  sleep 0.3
   S3=$(py '[{"cmd":"state"}]')
-  [ "$(jget "$S3" cards)" = "8" ] && break
-  sleep 0.2
+  [ "$(jget "$S3" cards)" = "8" ] && [ "$(jget "$S3" entries)" = "9" ] && break
 done
-if [ "$(jget "$S3" cards)" = "8" ]; then
-  ok "a completion arriving while a card flies out gets its own card (not swallowed)"
+if [ "$(jget "$S3" cards)" = "8" ] && [ "$(jget "$S3" entries)" = "9" ]; then
+  ok "a completion arriving while a card flies out gets its own card (entries=9, not swallowed)"
 else
-  bad "dismiss-race: expected 8 cards, got $S3"
+  bad "dismiss-race: expected 8 cards / 9 entries, got $S3"
 fi
 # 自清理：把那张新卡也删掉，栈回到基线（否则会带偏后面的重启断言）
 py '[{"cmd":"clear","sessionId":"smoke-race","ref":"race:c"}]' >/dev/null
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in $(seq 1 15); do
   S4=$(py '[{"cmd":"state"}]')
   [ "$(jget "$S4" cards)" = "7" ] && [ "$(jget "$S4" entries)" = "8" ] && break
   sleep 0.2
