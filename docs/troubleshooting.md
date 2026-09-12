@@ -233,3 +233,26 @@ AFTER : scrollTop=3853, scrollHeight 7303→15895（历史已翻页加载）,
 **测试**：XCTest `PerRowTurnTests`（逐行独立锚点 / 重排后不丢 / 回落规则）+ 快照往返与旧文件兼容；`socket-smoke.sh` 断言合并卡落盘后是 `card=12 rows=[11, 12]`（同一 session 两帧不同 turn，各自保留）。
 
 **边界测试夹具**：`test/manual/push-anchors.py <socket> <sessionId> <turn>[:<标签>] ...` —— 对同一 session 连推多帧、每帧一个历史 turn，聚合成一张卡；逐行点击即可验证“窗口内 / 窗口外（需翻页）/ 极早 / 不存在的 turn（应回退最新）”四个边界。
+
+## 19. 改了 host/client 半区却没重启 `dsh web`：GUI 里跑的仍是旧代码
+
+**现象（2026-09-12 实测）**：daemon 静默退出后**再也不回来**，卡片一直不出现；同时插件派发出来的卡片行**没有 `turn`**（位置锚点失效）。
+
+**取证**：
+- 进程：`lsof -nP -iTCP:3080 -sTCP:LISTEN` → `node /Users/apple/.dsh/node_modules/.bin/dsh web`（本次 PID 11062）；`ps -o lstart` 显示它**9月10日 01:08** 就启动了，而今天的 PR（#14 turn 跟踪、#15 daemon 自愈）是白天才合进 main 的。
+- 行为：此后插件派发的行里没有 `turn` 字段（PR #14 才加的），且 daemon 死了没有触发重拉（PR #15 才加的逻辑）——与“加载的是 9月10日的 host 半区”完全一致。
+
+**结论**：host 半区（`lib/index.js`）是**在 GUI server 进程启动时**加载并被常驻引用的，`cp` 到 profile 目录**不会**让运行中的 GUI 换代码。所以：
+
+- 改 host 半区（事件跟踪 / 下发字段 / daemon 重拉）→ **必须重启 `dsh web`**（在自己终端里 Ctrl-C 后重跑），并刷新浏览器页面让 client 半区重新加载；
+- 只改 daemon 二进制（`bin/dsh-notify-server`）→ 重启 daemon 即可，GUI 不用动；
+- 只改 client 半区（`lib/client.js`）→ 刷新页面即可。
+
+**附带的一个坑**：daemon 装在终端里用 `... &` 起（没有 `nohup`/`disown`）时，**关掉那个终端会 SIGHUP 把它带走** —— 表现为“没有 crash 报告、日志 0 字节、进程凭空消失”。重启时用：
+
+```bash
+nohup /Users/apple/.dsh/profiles/web/node_modules/dsh-notify-macos/bin/dsh-notify-server \
+  /tmp/dsh-notify-macos.sock > /tmp/dsh-notify-macos.log 2>&1 & disown
+```
+
+（GUI 重启后由插件自己拉起的 daemon 挂在 GUI server 下，不会随终端退出；前提是 host 半区是含自愈逻辑的新版本。）
