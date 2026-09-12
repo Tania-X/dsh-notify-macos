@@ -61,6 +61,11 @@ Safari: You must enable 'Allow JavaScript from Apple Events' in the Developer
 
 ## 10. 守护进程存活与 socket 清理
 
+**补充（2026-09-11，真实事故）**：除了 socket 残留，还有**句柄残留**这个更隐蔽的坑 —— 插件用模块级 `daemonProcess` 做守卫（`if (!ok && daemonProcess === null) startDaemon()`）。当 daemon **被外部杀掉**（开发者 `pkill`、崩溃）时，句柄仍非 null，插件此后**再也不重拉**，每次通知都静默降级成 `osascript display notification`（系统通知横幅：样式不同、几秒自动消失、点不到）—— 极易误判为“卡片不见了/样式变了”。
+修复：`shouldStartDaemon()`（纯函数，含 2s 节流）+ 子进程 `exit`/`error` 监听清零句柄；两次调用点（投递与前暖）都改用该判断。回归测试见 `test/host-logic.test.js` 的 "daemon respawn policy"。
+
+> 另一个相关事实：**谁启动 daemon 决定了它的 Apple Events 授权**。macOS 把 Apple Events 归因给“责任进程”，daemon 由 `dsh web`（你从终端启动）或终端拉起时归因到**终端**并继承你勾选的授权；由**沙箱内的 agent shell** 拉起则没有授权 → 所有浏览器探测 `-10004`。所以 `-10004` 时先看 daemon 是从哪起的，别急着重装权限。
+
 守护进程由插件 spawn（detached），插件只在加载时 pre-warm 一次，不会周期性探活。若守护进程被杀会留下 stale socket 文件，`sendToDaemon` 连接失败后插件会重新 spawn（`daemonProcess === null` 判断），但若模块级变量已非 null（同一次加载内），可能不自动恢复——手动 `rm -f $TMPDIR/dsh-notify-macos.sock && pkill -f dsh-notify-server` 后触发一次事件即可。
 
 ## 11. fallback 语义：会话被删/归档后怎么办

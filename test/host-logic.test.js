@@ -9,7 +9,7 @@
  * Kept deliberately as pure-function tests (no ctx, no sockets, no daemon).
  */
 import { describe, expect, it } from "vitest";
-import { classifyTurnEndReason, isRootSession, nextTurnState, turnAnchorFor } from "../lib/index.js";
+import { classifyTurnEndReason, isRootSession, nextTurnState, turnAnchorFor, shouldStartDaemon } from "../lib/index.js";
 
 describe("isRootSession", () => {
   it("returns true for every session when rootOnly is false", () => {
@@ -122,5 +122,41 @@ describe("turn tracking (#3 position-indexed jump)", () => {
     expect(turnAnchorFor(state, "error")).toBe(9);
     expect(turnAnchorFor({ open: 4 }, "completed")).toBe(4);   // no ended turn yet
     expect(turnAnchorFor(undefined, "completed")).toBeUndefined();
+  });
+});
+
+describe("daemon respawn policy (regression: killed daemon never respawned)", () => {
+  it("spawns when no handle exists", () => {
+    expect(shouldStartDaemon({ hasHandle: false, handleDead: false, lastSpawnedAt: 0, now: 1000 })).toBe(true);
+  });
+
+  it("spawns when the handle is dead (crash or killed out of band)", () => {
+    // A daemon that had been healthy is replaced immediately.
+    expect(shouldStartDaemon({
+      hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1005, lastSpawnFailed: false
+    })).toBe(true);
+  });
+
+  it("throttles a crash loop (replacement also died immediately)", () => {
+    expect(shouldStartDaemon({
+      hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 1500, lastSpawnFailed: true
+    })).toBe(false);
+    expect(shouldStartDaemon({
+      hasHandle: true, handleDead: true, lastSpawnedAt: 1000, now: 3001, lastSpawnFailed: true
+    })).toBe(true);
+  });
+
+  it("spawns immediately when the failed marker has no timestamp to throttle on", () => {
+    expect(shouldStartDaemon({
+      hasHandle: false, handleDead: false, lastSpawnedAt: 0, now: 10, lastSpawnFailed: true
+    })).toBe(true);
+  });
+
+  it("never spawns a rival while the handle is alive (socket failure ≠ death)", () => {
+    // A live daemon may simply not be listening yet (or its socket file was
+    // removed); spawning another would race it over the same socket path.
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1500 })).toBe(false);
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 3001 })).toBe(false);
+    expect(shouldStartDaemon({ hasHandle: true, handleDead: false, lastSpawnedAt: 1000, now: 1100, retryAfterMs: 50 })).toBe(false);
   });
 });
