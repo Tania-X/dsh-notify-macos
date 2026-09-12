@@ -1,5 +1,25 @@
 # 变更记录
 
+## 0.1.1 — 2026-09-12
+
+**安装一步到位**：包内声明 `dsh.bundle`（`cordis.patch.yml`），于是
+
+```bash
+dsh plugin --profile web add github:Tania-X/dsh-notify-macos
+```
+
+一条命令即完成安装与激活 —— **不再需要手工编辑 profile 的 `cordis.patch.yml`**。
+个性化配置改为**按 id 覆盖**（用户层永远在 bundle 层之后应用）：
+
+```yaml
+# $DSH_HOME/profiles/web/cordis.patch.yml
+- id: notify-macos
+  config:
+    socketPath: /tmp/dsh-notify-macos.sock
+```
+
+同时更新 README（安装简化为一条命令）与 `docs/releasing.md`（不含 npm 的发版流程）。
+
 ## 0.1.0 — 2026-09-12
 
 **首个公开版本**（给朋友的试用版）。仓库此前未打过 tag、也未对外发布过任何版本，所以号从
