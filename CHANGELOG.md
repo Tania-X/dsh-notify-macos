@@ -20,6 +20,14 @@ dsh plugin --profile web add github:Tania-X/dsh-notify-macos
 
 同时更新 README（安装简化为一条命令）与 `docs/releasing.md`（不含 npm 的发版流程）。
 
+**实机验证**（本机干净装机）：卸载插件 + 把 profile 的 `cordis.patch.yml` 清空为默认的 `[]`
+之后，仅执行 `dsh plugin --profile web add <包>`，`dsh.profile.bundles` 就自动加入了
+`dsh-notify-macos`，`dsh --profile web --dump-config` 里出现完整条目 —— **无需任何手工插入**。
+
+顺带记一个坑：profile 的 patch 文件**必须是顶层数组**。把它"注释掉"成只有注释的空文件会解析成
+`null`，`dsh` 直接启动失败（`must be a top-level YAML array of loader patch entries`）；
+要清空就保留最后一行的 `[]`。
+
 ## 0.1.0 — 2026-09-12
 
 **首个公开版本**（给朋友的试用版）。仓库此前未打过 tag、也未对外发布过任何版本，所以号从

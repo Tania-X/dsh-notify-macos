@@ -48,7 +48,11 @@ dsh --profile web --dump-config | grep -A 3 notify-macos   # 应看到 notify-ma
 >   config:
 >     socketPath: /tmp/dsh-notify-macos.sock
 > ```
-> 可覆盖的字段见下面的「配置」。
+> 只写你要改的字段即可，其余走插件自身的默认值；可覆盖的字段见下面的「配置」。
+>
+> ⚠️ 这个文件必须是**顶层 YAML 数组**：想临时关掉所有覆盖时请保留最后一行的 `[]`，
+> 不要留成"只有注释"的空文件 —— 那样解析成 `null`，`dsh` 会因为
+> `must be a top-level YAML array of loader patch entries` 直接启动失败（实测踩过）。
 
 **装好了怎么确认**
 
