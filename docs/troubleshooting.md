@@ -256,3 +256,88 @@ nohup /Users/apple/.dsh/profiles/web/node_modules/dsh-notify-macos/bin/dsh-notif
 ```
 
 （GUI 重启后由插件自己拉起的 daemon 挂在 GUI server 下，不会随终端退出；前提是 host 半区是含自愈逻辑的新版本。）
+
+### 18.3 真实 GUI 的逐行锚点边界实测（client 侧，不依赖 daemon）
+
+`test/manual/real-gui-multi-anchor.mjs` 直接对**真实 `dsh web`** 逐条发深链
+（`#dsh-notify-macos/session=<id>&turn=N`），量测每一档锚点的落点 —— 不需要 daemon、不需要
+macOS 自动化授权，因此可以在“卡片点击”之外独立验证 client 半区：
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs 104 98 60 20 1 9999
+```
+
+本次实测（会话 `…404c20`，视口 644px）：
+
+| 锚点 | 结果 | 数据 |
+| --- | --- | --- |
+| 104（最新，窗口内） | ✅ 精确命中 | `turn-tail104` 在视口 386px ≈ 60%，未到底部 |
+| 98（窗口内偏旧） | ✅ 精确命中 | 行数 253→642（翻页），386px |
+| 60（窗口外，需翻页） | ✅ 精确命中 | 行数 →2019，`scrollHeight 39637→123272`，386px |
+| 20（更旧） | ✅ 命中 | `scrollTop=6005`，贴近已加载历史的顶部 |
+| 1（最早） | ⚠️ 回退 | 只翻到 `tailRange 15..107`，8s 时限内到不了最开头 → 回退“钉最新”（底部） |
+| 9999（不存在该 turn） | ✅ 设计内回退 | 稳定后 `atBottom=true`，最新行在视口内 |
+
+**边界语义（两档）**：
+1. **会话真的有的锚点** → 落到**它自己**的 `turn-tail<N>` 行、视口 40–80% 带内（这一步也是逐行锚点功能的验收点：每行带自己的 `turn`）；
+2. **取不到的锚点**（不存在的 turn，或超出翻页预算的极旧 turn）→ 回退 `pinToNewest`（最新行可见）——**永远不比加锚点之前更差**。
+
+**已知预算**：client 的 seek 有 8s 时限 + “连续 3 次没加载出新内容就停手”。本会话从最新翻到 turn 15 就要 `rows 253→3338`、`scrollHeight 720→218168`，因此极旧锚点（如 turn 1）会在时限内放弃并回退；这不是 bug，而是“点击后不能一直僵着”的取舍。要覆盖更深的锚点就调大 `scrollToTurn` 的 `timeoutMs`（代价是点了以后停留更久）。
+
+**探针取数要等稳定**：回退路径（`pinToNewest`）比直接命中晚落位，脚本对“无锚点”档等 12s 而不是 9s —— 否则会读到滚动中途的位置，把 9999 误判成失败（本次第一版就踩了）。
+
+## 20. 「点了卡片它直接消失、但没有跳转」：跳转成功了，可窗口没到你眼前
+
+**现象（用户报告，含条件）**：当 App 处于激活状态（点的是 Safari 页面）时能跳；但如果当时前台是别的 App（菜单栏显示 `文件/编辑/显示/窗口/帮助` 那一栏）→ 卡片直接消失，什么都没跳。
+
+**排查**：日志里那些点击**全部**是“成功”的 ——
+```
+[jump] target=…&turn=98 (turn=98)
+[jump] pass 1 probing Safari
+[navigate] Safari tab updated; modern-activating
+[jump] navigated tab in Safari
+```
+即：AppleScript **确实把托管标签页的 URL 改掉了**，但**“浏览器有没有真的到前台”这一步完全没被观测** —— 代码是 `_ = activateApp(appName)`，返回值直接丢掉、失败不记日志。于是出现“跳转逻辑跑完了 → 卡片按设计 dismiss → 用户屏幕上什么都没发生”的假成功。
+
+更早的设计取舍是：`activateApp` 故意**不带** `.activateAllWindows`（避免把别的 Space 的窗口全抬起来压住用户正在用的 App）。代价就是：当弱激活没能把浏览器带到前台时，**没有任何补救、也没有任何记录**。
+
+**修法（三层）**：
+1. **激活可观测 + 一次性升级**：新增 `bringBrowserForward(appName)` —— 记录激活前后的 frontmost bundleId；若弱激活后浏览器仍不是前台，**升级一次** `.activateAllWindows` 并在 0.75s 内轮询确认，日志形如
+   `[activate] Safari not frontmost after weak activate (returned=true frontmost=com.apple.finder before=com.apple.finder); escalating to activateAllWindows`
+   `[activate] Safari frontmost=com.apple.Safari visible=true escalated=true before=com.apple.finder`
+2. **托管窗口取消最小化**：AppleScript 找到目标窗口后先 `if miniaturized of hostWindow then set miniaturized of hostWindow to false`（Chromium 方言用 `try … end try` 包住），再切标签、置顶窗口 —— 最小化的窗口“跳成功了也看不见”。
+3. **不可见就不吞卡片**：`BrowserJumper.jump` 现在返回“用户能不能看见”（`JumpPolicy.isVisibleToUser(navigated:browserIsFrontmost:)`）；`performAction` 与点击回调把它传回主线程，**只有确认可见才 dismiss 卡片/删掉那一行**，否则保留（日志 `[cards] jump not visible; row N kept so it can be retried`）。卡片不再因为一次看不见的跳转而消失。
+
+**取舍与验证**：弱激活（不打扰其它 Space）仍是首选，只有确认失败才升级；`JumpPolicy.activationSettleSeconds = 0.75s` 给激活留出轮询窗口但不会卡住 UI。socket `debug` 命令的回复现在带 `{"ok":true,"outcome":"visible|unconfirmed|notApplicable","visible":true|false}`，可以在不打卡片的情况下直接验证这条链路（前台 App 状态由 `frontmost→escalated→visible` 三段日志给出）。
+
+### 20.1 一轮评审后的修正：三态语义 + 按身份删行
+
+第一版把「用户能不能看见」直接做成 `Bool`，被 AI 审查判为 **[4] 严重**：**若干路径无条件返回 true** —— `sessionId` 缺失的早退只调了 `NSWorkspace.open` 就返回 true；`open-folder` / `open-web` / `default` 分支同样恒 true。这些路径**从未做过前台校验**，却向调用方报告“可见”，于是卡片照旧被 dismiss —— 与本次要修的「假成功」是同一类问题。
+
+**改法（三态，纯策略在 Core 可测）**：
+
+| 结果 | 含义 | 卡片/行 |
+| --- | --- | --- |
+| `visible` | 动作执行了，且确认用户看得见（浏览器已在前台/被抬到前台） | 丢弃 |
+| `unconfirmed` | 试过了但**确认不了**可见性 | **保留**（可重试） |
+| `notApplicable` | 与“位置跳转”无关（无 sessionId 只打开 GUI 根地址、纯本地动作） | 丢弃（与旧行为一致） |
+
+`JumpPolicy.shouldDismissCard(after:)` 就是这条规则（只有 `unconfirmed` 保留），`open-folder` / `open-web` 也改成**先确认前台**（Finder / 任一浏览器）再返回，不再假装成功。
+
+**第 2 轮评审又指出一处 [4]（同样是我这次引入的）**：`open-folder` / `open-web` 的前台确认轮询跑在**主线程**上 —— `jump()` 对非 `jump-web` 动作走的是 `completion?(run())` 同步分支，而这个分支由点击的 mouseUp（主线程）调用，`confirmFrontmost` 内部是 0.75s 的 `Thread.sleep` 忙等，于是点这类卡片会让 UI 卡最多 0.75s，也违背了本文件“驱动浏览器一律下后台”的既有约定。改法：**凡是需要回报结果的动作统一进后台队列**，完成后再跳回主线程回调（`guard completion != nil || action == "jump-web" else { fire-and-forget }`）—— 不再有“只有 jump-web 才下后台”的特例。同一轮还把 `debug` 命令的注释改准：它只覆盖 `jump-web` 语义，`open-folder`/`open-web` 的真实点击会额外做前台确认，可能得出 `unconfirmed`，不要把它当成“完全镜像”。
+
+**第 3 轮评审本身「质量未达标」**（judge 62/100 < 阈值 70，工具发了降级说明并提示 rerun；judge 同时指出这轮**没审到** `JumpPolicy` 新增的激活/可见性逻辑 —— 属漏报）。它未过门禁的两条里，有一条是真问题：**载荷缺失时卡片会永远点不掉** —— `open-folder`（`path` 为空）与 `open-web`（`url` 缺失/不可解析）返回 `unconfirmed`，于是卡片被永久保留，只能拖走。这类退化载荷本来就“没有动作可做、也就没有可见性可言”，应返回 `notApplicable`（与旧行为一致：点一下即消除）。另一条是把身份匹配键从 `message+kind+time` 加严到**再加 `detail` 与 `turn`**（避免同 message/kind/time 的两行混淆），两条都只有几行，已一并修掉。
+
+**另一处（[2] 轻微，但窗口是我这次引入的）**：把行删除改成异步回调后，回调里的 `row` 行号可能已经陈旧 —— 两次快速点击不同行、回调乱序返回时，会删掉**相邻**那一行。改成**按身份删除**：点击时抓下该行的 `CompletionEntry`，回调里用 `CardModel.index(of:)` / `removeCompletion(matching:)` 按 `message+kind+time` 重新定位，找不到就当作“已被另一次点击处理”跳过。XCTest 与 `test/core-local-check.sh` 都覆盖了「先前删掉一行后按身份删仍删对行」。
+
+## 21. daemon「凭空消失」的两级真因：请求缺换行 + 缺 SIGPIPE 防护
+
+排查「点击卡片无反应」时顺手撞出来的独立问题，两级原因叠加，表现为**没有 crash 报告、日志 0 字节、进程消失**：
+
+1. **协议：请求以换行结尾才算完整。** daemon 的读取循环是
+   `if buffer.contains(0x0A) { break }` —— 客户端不发结尾 `\n`，daemon 就**一直阻塞在 `read()`**，直到对端关闭（EOF）才处理这条请求。表现：调用方看到“超时”，而请求其实**在处理时成功了**（现场：我的人工推送脚本每帧都“超时”，但卡片一张不落全落盘 —— 因为它是在脚本关闭 socket 之后才被处理的）。
+2. **缺 SIGPIPE 防护。** 请求在 EOF 之后才被处理，此时对端 fd 已关闭；daemon 写回复 → `SIGPIPE` → **进程被信号杀死**（默认动作），于是没有 crash 报告、日志也是空的。这就是同一天里 daemon 数次“静静消失”的直接原因；插件自己派发（`lib/index.js` 的 `socket.write(\`…\n\`)`）**是带换行的**，所以正常使用不会触发，是**人工探测脚本**（`test/manual/push-anchors.py` 最初版本）把它踩出来的。
+
+**修法**：`Sources/dshNotifyServer/main.swift` 在 main 顶部 `signal(SIGPIPE, SIG_IGN)` —— 作为 socket 服务端，对端提前挂断绝不能杀死守护进程；写失败已被忽略，现在不再致命。探测脚本补上结尾 `\n`（并注明协议要求）。`test/socket-smoke.sh` 新增断言永久锁住这条：**发一条不带换行的请求后立刻挂断，daemon 必须仍然存活**（`PASS: daemon survives a peer that hangs up mid-request (SIGPIPE)`）。
+
+**附带收获**：这两周里 daemon 每次意外死掉都能被插件重新拉起（第 15 号 PR 的自愈逻辑），本次现场也复现了两次（PID 32114 → 32162 → 32244），并且**插件拉起的 daemon 能正常驱动 Safari、没有 `-10004`** —— 说明 Automation 授权沿 GUI server 的责任链继承，人工在终端里起 daemon 已非必需。

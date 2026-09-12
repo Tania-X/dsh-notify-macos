@@ -41,6 +41,26 @@ public func XCTAssertNotEqual<T: Equatable>(
     _ message: String = "", file: StaticString = #filePath, line: UInt = #line
 ) {}
 
+public func XCTAssertGreaterThan<T: Comparable>(
+    _ expression1: @autoclosure () throws -> T, _ expression2: @autoclosure () throws -> T,
+    _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+) {}
+
+public func XCTAssertGreaterThanOrEqual<T: Comparable>(
+    _ expression1: @autoclosure () throws -> T, _ expression2: @autoclosure () throws -> T,
+    _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+) {}
+
+public func XCTAssertLessThan<T: Comparable>(
+    _ expression1: @autoclosure () throws -> T, _ expression2: @autoclosure () throws -> T,
+    _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+) {}
+
+public func XCTAssertLessThanOrEqual<T: Comparable>(
+    _ expression1: @autoclosure () throws -> T, _ expression2: @autoclosure () throws -> T,
+    _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+) {}
+
 public func XCTAssertNil(
     _ expression: @autoclosure () throws -> Any?, _ message: String = "",
     file: StaticString = #filePath, line: UInt = #line

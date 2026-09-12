@@ -95,6 +95,27 @@ public final class CardModel {
         return entries.count
     }
 
+    /// 1-based index of the row matching `entry` (same message/kind/time), or
+    /// nil when it is no longer present.
+    ///
+    /// Row removal runs from an async click callback, so an index captured at
+    /// click time can be stale by then (another click's removal already shifted
+    /// the array). Removing by identity deletes the row the user actually
+    /// clicked instead of a neighbour.
+    public func index(of entry: CompletionEntry) -> Int? {
+        entries.firstIndex {
+            $0.time == entry.time && $0.message == entry.message && $0.kind == entry.kind
+                && $0.detail == entry.detail && $0.turn == entry.turn
+        }.map { $0 + 1 }
+    }
+
+    /// Remove the row matching `entry`; nil when it is already gone.
+    @discardableResult
+    public func removeCompletion(matching entry: CompletionEntry) -> CompletionEntry? {
+        guard let index = index(of: entry) else { return nil }
+        return removeCompletion(index: index)
+    }
+
     /// Remove one completion by its 1-based arrival index and reindex the
     /// remainder so row indices stay contiguous. Auto-collapses when one or
     /// zero entries remain. Returns the removed entry, or nil when out of range.

@@ -171,6 +171,43 @@ final class PerRowTurnTests: XCTestCase {
         XCTAssertEqual(m.jumpTurn(forRow: 2, cardTurn: 20), 20)
     }
 
+    func testRemoveCompletionByIdentitySurvivesAnEarlierRemoval() {
+        let m = CardModel()
+        let a = Date(timeIntervalSince1970: 1_700_000_000)
+        let b = Date(timeIntervalSince1970: 1_700_000_060)
+        m.addCompletion(message: "a", kind: .completed, detail: nil, at: a, turn: 104)
+        m.addCompletion(message: "b", kind: .completed, detail: nil, at: b, turn: 98)
+        m.addCompletion(message: "c", kind: .completed, detail: nil, at: b, turn: 60)
+        let clicked = m.entries[2]                       // row 3 = "c"
+        XCTAssertNotNil(m.removeCompletion(index: 1))    // "a" was handled first
+        XCTAssertEqual(m.index(of: clicked), 2)          // "c" shifted 3 -> 2
+        XCTAssertEqual(m.removeCompletion(matching: clicked)?.message, "c")
+        XCTAssertEqual(m.entries.map(\.message), ["b"])
+    }
+
+    func testIdenticalRowsStayDistinguishableByDetailAndTurn() {
+        let m = CardModel()
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        m.addCompletion(message: "same", kind: .error, detail: "E1", at: t, turn: 60)
+        m.addCompletion(message: "same", kind: .error, detail: "E2", at: t, turn: 61)
+        let second = m.entries[1]
+        XCTAssertEqual(m.index(of: second), 2)
+        _ = m.removeCompletion(index: 1)
+        XCTAssertEqual(m.removeCompletion(matching: second)?.detail, "E2")
+    }
+
+    func testRemoveCompletionByMissingIdentityIsANoOp() {
+        let m = CardModel()
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        m.addCompletion(message: "a", kind: .completed, detail: nil, at: t, turn: 1)
+        let gone = CompletionEntry(
+            message: "ghost", time: t, kind: .completed, detail: nil, index: 9
+        )
+        XCTAssertNil(m.index(of: gone))
+        XCTAssertNil(m.removeCompletion(matching: gone))
+        XCTAssertEqual(m.completionCount, 1)
+    }
+
     func testJumpTurnFallsBackToCardTurn() {
         let m = CardModel()
         m.addCompletion(message: "a", kind: .completed, detail: nil)   // no anchor
