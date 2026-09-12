@@ -1,0 +1,76 @@
+name: Publish to npm
+
+# 发版流程：在 GitHub 上建 Release（或推 `v*` tag）之后，自动把**同一个版本**发到 npm，
+# 于是 tag / CHANGELOG / npm 版本三者天然一致 —— 维护者不需要在本地做任何发布操作。
+#
+# 需要一次性配置：仓库 Settings → Secrets and variables → Actions 添加
+#   NPM_TOKEN = npm 的 Automation 类型 token（Automation 类型不会被 2FA 卡住）
+# 详见 docs/releasing.md。
+on:
+  release:
+    types: [published]
+  workflow_dispatch: # 也允许手动触发：补发、重试
+
+jobs:
+  publish:
+    name: npm publish (--provenance)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance（签名证明"这个包来自本仓库的哪个 commit"）需要
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      # 发布前跑一遍纯逻辑测试，做个快速兜底（完整校验在 Tests 工作流里）。
+      - run: npm test
+
+      - name: 版本信息
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "package.json version = $VERSION"
+
+      # tag 与 package.json 必须一致：否则会把错误的版本号发上去，而 npm 的版本号不可复用。
+      - name: tag 与 package.json 版本一致性
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "$TAG" != "v${{ steps.meta.outputs.version }}" ]; then
+            echo "::error::Release tag $TAG 与 package.json 的 ${{ steps.meta.outputs.version }} 不一致（应为 v${{ steps.meta.outputs.version }}）"
+            exit 1
+          fi
+          echo "tag 与 package.json 一致：$TAG"
+
+      # npm 上同一版本号永久占用：已存在就跳过，避免整条流水线变红。
+      - name: 该版本是否已发布过
+        id: check
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if npm view "dsh-notify-macos@${{ steps.meta.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::dsh-notify-macos@${{ steps.meta.outputs.version }} 已存在于 npm，跳过发布"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.check.outputs.published == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: 发布结果
+        run: |
+          echo "包页面：https://www.npmjs.com/package/dsh-notify-macos"
+          echo "朋友现在可以用：dsh plugin --profile web add dsh-notify-macos"

@@ -27,9 +27,9 @@ DeepSeek Harness（DSH）的 macOS 通知插件：任务一结束，就在屏幕
 
 ```bash
 # 1) 装进 web profile（pnpm 模式，与 dsh 官方插件一致）
-git clone https://github.com/Tania-X/dsh-notify-macos.git
-dsh plugin --profile web add /path/to/dsh-notify-macos
-#    也可以直接： dsh plugin --profile web add github:Tania-X/dsh-notify-macos
+dsh plugin --profile web add github:Tania-X/dsh-notify-macos   # 首次约 3 分钟（git）
+#    已发布到 npm 的版本更快： dsh plugin --profile web add dsh-notify-macos
+#    离线/最快：下载 Release 里的 .tgz 后 add <路径>（但别删那个文件，见 docs/releasing.md）
 
 # 2) 注册插件（config 可整段照抄，字段见下面的「配置」）
 $EDITOR "$DSH_HOME/profiles/web/cordis.patch.yml"
@@ -174,6 +174,10 @@ npm run test:e2e                  # client 半区 Playwright（自带 harness �
 ```
 
 CI（`.github/workflows/tests.yml`）：ubuntu 跑 vitest + Playwright，macos-15 跑 `swift test` + Core 自检 + 真 socket 集成测试。
+
+## 发版（维护者）
+
+流程与 npm 自动发布见 [docs/releasing.md](docs/releasing.md)：升版本 → 合 PR → 建 Release（tag 形如 `v0.2.0`）→ CI 自动 `npm publish --provenance`。
 
 ## 平台与许可
 
