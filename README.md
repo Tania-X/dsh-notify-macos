@@ -69,13 +69,15 @@ printf '{"cmd":"ping"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"   # → {"ok":
 # 若你在配置里钉了 socketPath，就换成那个路径（例如 /tmp/dsh-notify-macos.sock）
 ```
 
-> **Intel Mac / 二进制跑不起来？** 仓库里预编译的 `bin/dsh-notify-server` 是 **Apple Silicon（arm64）**。
-> Intel 机器上自行编译一次即可（需要 Xcode Command Line Tools）：
+> **二进制说明**：仓库里预编译的 `bin/dsh-notify-server` 是 **universal（Apple Silicon + Intel）**，
+> 两种 Mac 都能直接用。若它被 Gatekeeper 拦下（从浏览器下载的压缩包会带隔离标记）：
+> `xattr -dr com.apple.quarantine /path/to/dsh-notify-macos`。
+>
+> 想自己重新编译（改代码后，或换平台版本）：
 > ```bash
-> cd /path/to/dsh-notify-macos && swift build -c release && cp .build/release/dsh-notify-server bin/
+> swift build -c release && cp .build/release/dsh-notify-server bin/   # 只编本机架构
+> scripts/build-universal.sh                                          # 编 universal 双架构
 > ```
-> 若二进制被 Gatekeeper 拦下（从浏览器下载的压缩包会带隔离标记）：
-> `xattr -dr com.apple.quarantine /path/to/dsh-notify-macos`
 
 ## 使用
 
@@ -175,5 +177,5 @@ CI（`.github/workflows/tests.yml`）：ubuntu 跑 vitest + Playwright，macos-1
 
 ## 平台与许可
 
-- 仅 macOS。守护进程用 Swift 5.9+ / SwiftPM 编译；仓库内附 Apple Silicon 预编译二进制。
+- 仅 macOS。守护进程用 Swift 5.9+ / SwiftPM 编译；仓库内附 **universal（Apple Silicon + Intel）** 预编译二进制（构建方式见 `scripts/build-universal.sh`）。
 - MIT，见 [LICENSE](LICENSE)。改动记录见 [CHANGELOG.md](CHANGELOG.md)。

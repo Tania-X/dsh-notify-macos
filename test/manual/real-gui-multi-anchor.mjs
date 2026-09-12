@@ -6,7 +6,11 @@
 // Run: PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs [turn ...]
 import { chromium } from "@playwright/test";
 
-const SID = process.env.DSH_NOTIFY_SESSION || "session-a937986d-3459-4bd1-ad01-821844404c20";
+const SID = process.env.DSH_NOTIFY_SESSION;
+if (!SID) {
+  console.error("请通过 DSH_NOTIFY_SESSION=<会话 id> 指定要探测的会话");
+  process.exit(2);
+}
 const turns = process.argv.slice(2).map(Number).filter((n) => Number.isFinite(n));
 const ANCHORS = turns.length ? turns : [104, 98, 60, 1, 9999];
 

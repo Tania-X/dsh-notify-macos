@@ -30,6 +30,11 @@
 - **dismiss 中间态统一处理**：正在消失的卡片在合并/`relayout`/`persist`/`clear`/`state` 五处都被当作"已经不在"，
   修掉"新通知被吞"、"卡片飞出去又被拽回"、"重启后出现 0 行空卡"三类问题。
 
+### 二进制
+
+- 预编译守护进程改为 **universal（arm64 + x86_64）**：Apple Silicon 与 Intel Mac 都能直接用；
+  构建方式为「分架构交叉编译 + `lipo` + ad-hoc 签名」（`scripts/build-universal.sh`，只需 CLT 不需要完整 Xcode）。
+
 ### 安装与文档
 
 - 安装走 DSH 官方方式：`dsh plugin --profile web add <包>` + `cordis.patch.yml` 注册；

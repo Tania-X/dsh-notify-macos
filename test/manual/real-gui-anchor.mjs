@@ -3,7 +3,13 @@
 // lands, so the client behaviour can be checked against the real DOM.
 // Run: PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-anchor.mjs
 import { chromium } from "@playwright/test";
-const SID = "session-a937986d-3459-4bd1-ad01-821844404c20";
+// 会话 id 必须显式给出（不要把它写死在仓库里）：
+//   DSH_NOTIFY_SESSION=session-… node test/manual/real-gui-anchor.mjs
+const SID = process.env.DSH_NOTIFY_SESSION;
+if (!SID) {
+  console.error("请通过 DSH_NOTIFY_SESSION=<会话 id> 指定要探测的会话");
+  process.exit(2);
+}
 const b = await chromium.launch();
 const p = await b.newPage();
 await p.goto("http://127.0.0.1:3080", { waitUntil: "domcontentloaded" });

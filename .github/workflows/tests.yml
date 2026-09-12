@@ -33,6 +33,9 @@ jobs:
       # 放在这里可以保证它在 CI 上同样有效。
       - name: Run core invariants check (no XCTest)
         run: test/core-local-check.sh
+      # 守护进程要发布 universal 二进制：Intel 切片单独编一遍，避免只在 arm64 上悄悄坏掉。
+      - name: Cross-build the x86_64 slice (universal binary stays buildable)
+        run: swift build -c release --triple x86_64-apple-macosx13.0
       # 平台相关的 host 集成测试（真 unix socket 驱动 apply()）：插件在非 macOS
       # 会主动 early-return，所以这些用例只能在 macOS runner 上跑，ubuntu 的
       # node job 里会被 skipIf 跳过 —— 覆盖缺口由这一步补上。
