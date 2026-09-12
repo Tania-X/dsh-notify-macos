@@ -397,6 +397,7 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 
 **测试（自测三层 + 冒烟）**：
 
+- 评审指出的一处真问题已修：`approval/asked` 原来在缺 `id` 时回退用 `callId` 造键，但 `approval/decided` 只带 `id`，这种键**永远匹配不上**、只会留下悬空键 —— 现在缺 `id` 就不给 `ref`（卡片退回"点了才走"的旧行为）；
 - vitest **45 条**：纯函数两套（`blocked-resolve.test.js`：键的构造/解析、pending 状态机、payload 必带 ref）+ **真 socket 集成**（`blocked-resolve-integration.test.js`：起一个假 daemon，驱动真实 `apply()`，断言 asked→show(带 ref)、decided→clear(同 ref)、ask→tool/result→clear、**无关 tool/result 不发 clear**、未登记的 decided 仍自愈、别的审批 decided 时不动）；
 - XCTest `BlockedRefTests` 5 条（按 ref 只删该行 / 未知 ref no-op / 删到一行自动折叠 / 删空即计数 0 / ref 快照往返）+ 旧格式快照（连 `ref` 都没有）仍能加载；
 - `test/core-local-check.sh` 同款断言（本机无需 XCTest 即可跑）；

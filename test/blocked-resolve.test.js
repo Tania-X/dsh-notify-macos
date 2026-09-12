@@ -42,10 +42,12 @@ describe("blockedRef", () => {
     expect(blockedRef(ask("c7"))).toBe("ask:c7");
   });
 
-  it("falls back to callId when an approval has no id", () => {
-    expect(blockedRef({ type: "approval/asked", data: { callId: "c1", toolName: "bash" } })).toBe(
-      "approval:c1",
-    );
+  it("yields no key when an approval carries no id", () => {
+    // approval/decided only has `id`, so a callId-derived key could never match:
+    // emit nothing rather than a dangling key (the row keeps the old
+    // click-to-dismiss behaviour).
+    expect(blockedRef({ type: "approval/asked", data: { callId: "c1", toolName: "bash" } })).toBeNull();
+    expect(blockedRef({ type: "approval/asked", data: { toolName: "bash" } })).toBeNull();
   });
 
   it("ignores events that do not await the user", () => {
