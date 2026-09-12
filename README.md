@@ -132,6 +132,7 @@ cp .build/release/dsh-notify-server bin/                 # 产物就位（插件
 npm test                                                 # host/client 纯逻辑单测（vitest）
 swift test                                               # Core XCTest（需含 XCTest 的 Xcode/CI；本地 CLT-only 会报 XCTest not available）
 ./test/parse-swift-tests.sh                              # 本地语法自检测试源码（无需 XCTest）
+./test/typecheck-swift-tests.sh                          # 本地类型检查 XCTest 源码（桩模块，无需 XCTest）
 ./test/core-local-check.sh                               # 本地 Core 不变量自检（swiftc 直编，无需 XCTest）
 ./test/socket-smoke.sh                                   # daemon 协议冒烟基线
 npm run test:e2e                                        # client 半区 Playwright（harness 页，无需真 dsh web）

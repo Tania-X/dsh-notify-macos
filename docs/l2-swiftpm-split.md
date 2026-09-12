@@ -136,3 +136,24 @@ Tests/
 - 深链：`&turn=` 只在正数时出现。
 
 它断言更少，**不是 XCTest 的替代品**：CI 的 `Tests` 工作流两个都跑（`swift test` + 本地自检脚本），权威基线仍是 XCTest。
+
+## 12. 本地 XCTest **类型检查**（`test/typecheck-swift-tests.sh`）
+
+`parse-swift-tests.sh` 只是 `swiftc -parse`：**语法**过得去，类型错误照样漏。实测踩雷：给 `SnapshotTurnTests` 写新用例时引用了 `t0` —— 那是**另一个类** `CardStackSnapshotTests` 的私有属性，于是 CI 的 macos runner 直接编译失败（`cannot find 't0' in scope`），测试一条都没跑，白等一轮 CI；本机 `-parse` 全绿，毫无提示。
+
+做法：本机确实没有 XCTest，但**可以造一个只含 API 声明的同名模块**：
+
+1. `swiftc -emit-module -enable-testing -module-name dshNotifyCore` 把 Core 编成模块（`-enable-testing` 才能 `@testable import`）；
+2. `test/xctest-shim/XCTest.swift` 声明测试用到的 API 子集（`XCTestCase`、`XCTAssertEqual`/`True`/`False`/`Nil`/`NotNil`、`XCTFail`、`XCTUnwrap`，含 `accuracy:` 重载）编成 `XCTest.swiftmodule`；
+3. `swiftc -typecheck -I <临时目录> Tests/dshNotifyCoreTests/*.swift` —— 只做类型检查，不链接、不执行。
+
+**桩模块必须 `@_exported import Foundation`**：真实 XCTest 会再导出 Foundation，测试源码只写 `import XCTest` 就能用 `Date`/`DateFormatter`；不写这行会误报 `cannot find type 'Date' in scope`。
+
+它是**类型检查**，不替代 CI：断言实现是空的（`XCTUnwrap` 只保证返回类型），跑不出结果，权威基线仍是 `swift test`。两个本地脚本的分工：
+
+| 脚本 | 查什么 | 需要 XCTest |
+| --- | --- | --- |
+| `test/parse-swift-tests.sh` | 语法（括号/结构） | 否 |
+| `test/typecheck-swift-tests.sh` | 类型（作用域/API 签名） | 否（用桩模块） |
+| `test/core-local-check.sh` | 关键不变量**真跑一遍** | 否（`swiftc` 直编可执行） |
+| `swift test`（CI） | 全量断言 | 是 |

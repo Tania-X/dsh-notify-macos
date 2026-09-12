@@ -154,6 +154,8 @@ final class JumpLinkTests: XCTestCase {
 }
 
 final class SnapshotTurnTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
     func testTurnSurvivesSnapshotRoundTrip() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("dsh-notify-turn-\(UUID().uuidString).json")
