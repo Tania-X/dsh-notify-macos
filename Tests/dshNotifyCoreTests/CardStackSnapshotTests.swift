@@ -228,6 +228,9 @@ final class SnapshotTurnTests: XCTestCase {
         var card = cards[0]
         var entries = try XCTUnwrap(card["entries"] as? [[String: Any]])
         XCTAssertNotNil(entries[0].removeValue(forKey: "turn"), "fixture must actually drop the key")
+        // `ref` (blocked-row correlation key) is newer still: strip it too so
+        // the fixture stays a real pre-upgrade file.
+        entries[0].removeValue(forKey: "ref")
         card["entries"] = entries
         cards[0] = card
         root["cards"] = cards
@@ -242,5 +245,6 @@ final class SnapshotTurnTests: XCTestCase {
         XCTAssertEqual(snapshot.cards.first?.entries.first?.message, "a")
         XCTAssertEqual(snapshot.cards.first?.entries.first?.time, t0)
         XCTAssertNil(snapshot.cards.first?.entries.first?.turn)
+        XCTAssertNil(snapshot.cards.first?.entries.first?.ref)
     }
 }

@@ -164,11 +164,24 @@ final class NotificationCard: NSObject {
     /// for collapsed/expanded height. Returns the entry index (1-based).
     @discardableResult
     func addCompletion(
-        message: String, kind: OutcomeKind, detail: String?, at time: Date = Date(), turn: Int? = nil
+        message: String, kind: OutcomeKind, detail: String?, at time: Date = Date(),
+        turn: Int? = nil, ref: String? = nil
     ) -> Int {
-        let index = model.addCompletion(message: message, kind: kind, detail: detail, at: time, turn: turn)
+        let index = model.addCompletion(
+            message: message, kind: kind, detail: detail, at: time, turn: turn, ref: ref
+        )
         updateFrame()
         return index
+    }
+
+    /// Drop the row carrying this correlation key (the user resolved the
+    /// pending approval/question in the GUI). Returns the removed entry, or nil
+    /// when no row matches — e.g. the card was already handled by hand.
+    @discardableResult
+    func removeCompletion(ref: String) -> CompletionEntry? {
+        let removed = model.removeCompletion(ref: ref)
+        updateFrame()
+        return removed
     }
 
     /// Jump anchor for one row: that completion's own turn, falling back to the
@@ -1107,7 +1120,8 @@ final class CardStack {
                     kind: OutcomeKind.parse(entry.kind),
                     detail: entry.detail,
                     at: entry.time,
-                    turn: entry.turn
+                    turn: entry.turn,
+                    ref: entry.ref
                 )
             }
             card.onRemoved = { [weak self] removed in
@@ -1158,6 +1172,36 @@ final class CardStack {
         store.save(snapshot)
     }
 
+    /// Drop the row that waits on `ref` (the user resolved that approval or
+    /// question in the GUI). When it was the card's last row the card dismisses
+    /// itself; with rows left it re-stacks (and a one-row card auto-collapses,
+    /// see CardModel.removeCompletion).
+    ///
+    /// Reply payload mirrors the smoke test's counting style so a client can
+    /// assert the effect without reading the disk snapshot.
+    func clear(sessionId: String, ref: String) -> String {
+        guard let card = cards.first(where: { $0.sessionId == sessionId }) else {
+            dshLog("[clear] no card for session \(sessionId) ref=\(ref); nothing to do\n")
+            return "{\"ok\":true,\"removed\":0,\"reason\":\"no-card\"}"
+        }
+        guard card.removeCompletion(ref: ref) != nil else {
+            dshLog("[clear] card for \(sessionId) has no row with ref=\(ref); nothing to do\n")
+            return "{\"ok\":true,\"removed\":0,\"reason\":\"no-row\",\"remaining\":\(card.completionCount)}"
+        }
+        let remaining = card.completionCount
+        dshLog("[clear] removed ref=\(ref); \(remaining) row(s) left\n")
+        if remaining == 0 {
+            // Last row was waiting on the user: the whole card goes away
+            // (onRemoved → CardStack.remove, then relayout/persist).
+            card.dismiss()
+        } else {
+            // Re-stack under the shorter frame; the model already collapsed a
+            // single remaining row, so the card shows as collapsed.
+            card.onToggleExpanded?(card)
+        }
+        return "{\"ok\":true,\"removed\":1,\"remaining\":\(remaining)}"
+    }
+
     /// Diagnostic state (socket `state` command).
     func stateSummary() -> String {
         let entries = cards.reduce(0) { $0 + $1.completionCount }
@@ -1167,6 +1211,15 @@ final class CardStack {
     /// Show a completion. If a card for the same session already exists,
     /// merge into it (append entry, auto-expand optional); else create one.
     func show(request: ShowRequest) {
+        // One line per delivered frame: makes the host→daemon contract visible
+        // in the log (which kind, which session, and the blocked-row key that
+        // lets a later `clear` find exactly this row).
+        dshLog(
+            "[show] kind=\(request.kind ?? "completed")"
+            + " session=\(request.sessionId ?? "nil")"
+            + " turn=\(request.turn.map(String.init) ?? "nil")"
+            + " ref=\(request.ref ?? "nil")\n"
+        )
         let sessionTitle: String
         if let st = request.sessionTitle, !st.isEmpty {
             sessionTitle = st
@@ -1183,7 +1236,9 @@ final class CardStack {
         // Merge into an existing card for the same session.
         if let sessionId = request.sessionId, !sessionId.isEmpty,
            let existing = cards.first(where: { $0.sessionId == sessionId }) {
-            existing.addCompletion(message: message, kind: kind, detail: detail, turn: request.turn)
+            existing.addCompletion(
+                message: message, kind: kind, detail: detail, turn: request.turn, ref: request.ref
+            )
             if let turn = request.turn { existing.turn = turn }   // newest completion wins
             relayout(animated: false)
             if request.sound == true { NSSound(named: NSSound.Name("Glass"))?.play() }
@@ -1200,7 +1255,9 @@ final class CardStack {
             autoDismissSec: request.autoDismissSec,
             turn: request.turn
         )
-        card.addCompletion(message: message, kind: kind, detail: detail, turn: request.turn)
+        card.addCompletion(
+            message: message, kind: kind, detail: detail, turn: request.turn, ref: request.ref
+        )
         card.onRemoved = { [weak self] removed in
             self?.remove(removed)
         }
@@ -1344,7 +1401,8 @@ final class SocketServer {
                 sessionTitle: object["sessionTitle"] as? String,
                 sound: object["sound"] as? Bool,
                 autoDismissSec: object["autoDismissSec"] as? Double,
-                turn: object["turn"] as? Int
+                turn: object["turn"] as? Int,
+                ref: object["ref"] as? String
             )
             DispatchQueue.main.async { [weak self] in
                 self?.onShow?(request)
@@ -1360,6 +1418,22 @@ final class SocketServer {
             DispatchQueue.main.async { [weak self] in
                 let summary = self?.onState?() ?? "{\"ok\":false}"
                 reply(summary + "\n")
+                close(fd)
+            }
+            return true
+        case "clear":
+            // The user resolved a pending approval/question in the GUI: drop the
+            // row that was waiting on it. Runs on the main thread (the stack owns
+            // AppKit windows and the snapshot store).
+            let sessionId = object["sessionId"] as? String
+            let ref = object["ref"] as? String
+            guard let sessionId, !sessionId.isEmpty, let ref, !ref.isEmpty else {
+                reply("{\"ok\":false,\"reason\":\"bad-request\"}\n")
+                break
+            }
+            DispatchQueue.main.async { [weak self] in
+                let result = self?.onClear?(sessionId, ref) ?? "{\"ok\":false}"
+                reply(result + "\n")
                 close(fd)
             }
             return true
@@ -1392,6 +1466,8 @@ final class SocketServer {
     }
 
     var onShow: ((ShowRequest) -> Void)?
+    /// Handles `{cmd:"clear", sessionId, ref}`: returns a JSON reply string.
+    var onClear: ((String, String) -> String)?
     /// Returns a JSON state summary for the `state` diagnostic command.
     var onState: (() -> String)?
 }
@@ -1423,6 +1499,7 @@ server.onShow = { request in
     stack.show(request: request)
 }
 server.onState = { stack.stateSummary() }
+server.onClear = { sessionId, ref in stack.clear(sessionId: sessionId, ref: ref) }
 server.start()
 
 app.run()

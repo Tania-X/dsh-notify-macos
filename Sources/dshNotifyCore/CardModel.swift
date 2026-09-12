@@ -84,12 +84,13 @@ public final class CardModel {
     /// entry index (1-based).
     @discardableResult
     public func addCompletion(
-        message: String, kind: OutcomeKind, detail: String?, at time: Date = Date(), turn: Int? = nil
+        message: String, kind: OutcomeKind, detail: String?, at time: Date = Date(),
+        turn: Int? = nil, ref: String? = nil
     ) -> Int {
         entries.append(
             CompletionEntry(
                 message: message, time: time, kind: kind, detail: detail,
-                index: entries.count + 1, turn: turn
+                index: entries.count + 1, turn: turn, ref: ref
             )
         )
         return entries.count
@@ -116,6 +117,20 @@ public final class CardModel {
         return removeCompletion(index: index)
     }
 
+    /// 1-based index of the row carrying this correlation key, or nil.
+    public func index(ofRef ref: String) -> Int? {
+        entries.firstIndex { $0.ref == ref }.map { $0 + 1 }
+    }
+
+    /// Remove the row carrying this correlation key (used when the user
+    /// resolves the pending approval/question in the GUI). nil when no row
+    /// matches — e.g. the card was already handled by hand.
+    @discardableResult
+    public func removeCompletion(ref: String) -> CompletionEntry? {
+        guard let index = index(ofRef: ref) else { return nil }
+        return removeCompletion(index: index)
+    }
+
     /// Remove one completion by its 1-based arrival index and reindex the
     /// remainder so row indices stay contiguous. Auto-collapses when one or
     /// zero entries remain. Returns the removed entry, or nil when out of range.
@@ -126,7 +141,8 @@ public final class CardModel {
         for (i, entry) in entries.enumerated() {
             entries[i] = CompletionEntry(
                 message: entry.message, time: entry.time,
-                kind: entry.kind, detail: entry.detail, index: i + 1, turn: entry.turn
+                kind: entry.kind, detail: entry.detail, index: i + 1,
+                turn: entry.turn, ref: entry.ref
             )
         }
         if entries.count <= 1 { expanded = false }  // auto-collapse to single
