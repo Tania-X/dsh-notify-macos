@@ -33,6 +33,28 @@ final class JumpPolicyTests: XCTestCase {
         XCTAssertEqual(JumpPolicy.probeOrder(candidates: probeNames, preferring: "Firefox"), probeNames)
     }
 
+    // MARK: Activation visibility (the "card vanished, nothing jumped" bug)
+
+    func testEscalatesActivationOnlyWhenBrowserDidNotComeForward() {
+        XCTAssertTrue(JumpPolicy.shouldEscalateActivation(browserIsFrontmost: false))
+        XCTAssertFalse(JumpPolicy.shouldEscalateActivation(browserIsFrontmost: true))
+    }
+
+    func testJumpIsVisibleOnlyWhenNavigatedAndBrowserIsFrontmost() {
+        XCTAssertTrue(JumpPolicy.isVisibleToUser(navigated: true, browserIsFrontmost: true))
+        XCTAssertFalse(JumpPolicy.isVisibleToUser(navigated: true, browserIsFrontmost: false))
+        XCTAssertFalse(JumpPolicy.isVisibleToUser(navigated: false, browserIsFrontmost: true))
+        XCTAssertFalse(JumpPolicy.isVisibleToUser(navigated: false, browserIsFrontmost: false))
+    }
+
+    func testActivationWaitBudgetIsBounded() {
+        // A clicked card must not hang the UI thread waiting for the browser.
+        XCTAssertGreaterThan(JumpPolicy.activationSettleSeconds, 0)
+        XCTAssertLessThanOrEqual(JumpPolicy.activationSettleSeconds, 2)
+        XCTAssertGreaterThan(JumpPolicy.activationPollSeconds, 0)
+        XCTAssertLessThan(JumpPolicy.activationPollSeconds, JumpPolicy.activationSettleSeconds)
+    }
+
     func testShouldRetryOnlyWhenDeniedAndPassesRemain() {
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 1, sawDenied: true))
         XCTAssertTrue(JumpPolicy.shouldRetry(afterPass: 2, sawDenied: true))

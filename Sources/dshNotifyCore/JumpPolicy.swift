@@ -129,6 +129,31 @@ public enum JumpPolicy {
     public static func shouldOpenFallback(sawDenied: Bool) -> Bool {
         !sawDenied
     }
+
+    /// How long (seconds) to keep polling for "the browser actually came
+    /// forward" after activation before declaring the jump unconfirmed.
+    public static let activationSettleSeconds: Double = 0.75
+    /// Polling step while waiting for the browser to become frontmost.
+    public static let activationPollSeconds: Double = 0.05
+
+    /// Whether to escalate from weak activation (keeps other Spaces' stacking
+    /// intact) to `activateAllWindows`. A weak activation that did NOT make the
+    /// browser frontmost means the hosting window never came into view — the
+    /// reported "clicked the card, it vanished, nothing jumped" case — so
+    /// raising the app's windows is worth the stacking trade-off.
+    public static func shouldEscalateActivation(browserIsFrontmost: Bool) -> Bool {
+        !browserIsFrontmost
+    }
+
+    /// Whether the user should actually SEE the jump: the tab was navigated AND
+    /// its browser is frontmost (it may already have been frontmost — then no
+    /// activation was needed and the tab switch is visible immediately).
+    ///
+    /// Callers keep the card/row when this is false, instead of dismissing it
+    /// over a jump the user cannot see.
+    public static func isVisibleToUser(navigated: Bool, browserIsFrontmost: Bool) -> Bool {
+        navigated && browserIsFrontmost
+    }
 }
 
 /// Deep-link construction for a card click (pure so it can be unit-tested).

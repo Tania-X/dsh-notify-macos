@@ -285,3 +285,27 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 **已知预算**：client 的 seek 有 8s 时限 + “连续 3 次没加载出新内容就停手”。本会话从最新翻到 turn 15 就要 `rows 253→3338`、`scrollHeight 720→218168`，因此极旧锚点（如 turn 1）会在时限内放弃并回退；这不是 bug，而是“点击后不能一直僵着”的取舍。要覆盖更深的锚点就调大 `scrollToTurn` 的 `timeoutMs`（代价是点了以后停留更久）。
 
 **探针取数要等稳定**：回退路径（`pinToNewest`）比直接命中晚落位，脚本对“无锚点”档等 12s 而不是 9s —— 否则会读到滚动中途的位置，把 9999 误判成失败（本次第一版就踩了）。
+
+## 20. 「点了卡片它直接消失、但没有跳转」：跳转成功了，可窗口没到你眼前
+
+**现象（用户报告，含条件）**：当 App 处于激活状态（点的是 Safari 页面）时能跳；但如果当时前台是别的 App（菜单栏显示 `文件/编辑/显示/窗口/帮助` 那一栏）→ 卡片直接消失，什么都没跳。
+
+**排查**：日志里那些点击**全部**是“成功”的 ——
+```
+[jump] target=…&turn=98 (turn=98)
+[jump] pass 1 probing Safari
+[navigate] Safari tab updated; modern-activating
+[jump] navigated tab in Safari
+```
+即：AppleScript **确实把托管标签页的 URL 改掉了**，但**“浏览器有没有真的到前台”这一步完全没被观测** —— 代码是 `_ = activateApp(appName)`，返回值直接丢掉、失败不记日志。于是出现“跳转逻辑跑完了 → 卡片按设计 dismiss → 用户屏幕上什么都没发生”的假成功。
+
+更早的设计取舍是：`activateApp` 故意**不带** `.activateAllWindows`（避免把别的 Space 的窗口全抬起来压住用户正在用的 App）。代价就是：当弱激活没能把浏览器带到前台时，**没有任何补救、也没有任何记录**。
+
+**修法（三层）**：
+1. **激活可观测 + 一次性升级**：新增 `bringBrowserForward(appName)` —— 记录激活前后的 frontmost bundleId；若弱激活后浏览器仍不是前台，**升级一次** `.activateAllWindows` 并在 0.75s 内轮询确认，日志形如
+   `[activate] Safari not frontmost after weak activate (returned=true frontmost=com.apple.finder before=com.apple.finder); escalating to activateAllWindows`
+   `[activate] Safari frontmost=com.apple.Safari visible=true escalated=true before=com.apple.finder`
+2. **托管窗口取消最小化**：AppleScript 找到目标窗口后先 `if miniaturized of hostWindow then set miniaturized of hostWindow to false`（Chromium 方言用 `try … end try` 包住），再切标签、置顶窗口 —— 最小化的窗口“跳成功了也看不见”。
+3. **不可见就不吞卡片**：`BrowserJumper.jump` 现在返回“用户能不能看见”（`JumpPolicy.isVisibleToUser(navigated:browserIsFrontmost:)`）；`performAction` 与点击回调把它传回主线程，**只有确认可见才 dismiss 卡片/删掉那一行**，否则保留（日志 `[cards] jump not visible; row N kept so it can be retried`）。卡片不再因为一次看不见的跳转而消失。
+
+**取舍与验证**：弱激活（不打扰其它 Space）仍是首选，只有确认失败才升级；`JumpPolicy.activationSettleSeconds = 0.75s` 给激活留出轮询窗口但不会卡住 UI。socket `debug` 命令的回复现在带 `{"ok":true,"visible":false}`，可以在不打卡片的情况下直接验证这条链路（前台 App 状态由 `frontmost→escalated→visible` 三段日志给出）。
