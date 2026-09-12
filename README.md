@@ -177,5 +177,5 @@ CI（`.github/workflows/tests.yml`）：ubuntu 跑 vitest + Playwright，macos-1
 
 ## 平台与许可
 
-- 仅 macOS。守护进程用 Swift 5.9+ / SwiftPM 编译；仓库内附 Apple Silicon 预编译二进制。
+- 仅 macOS。守护进程用 Swift 5.9+ / SwiftPM 编译；仓库内附 **universal（Apple Silicon + Intel）** 预编译二进制（构建方式见 `scripts/build-universal.sh`）。
 - MIT，见 [LICENSE](LICENSE)。改动记录见 [CHANGELOG.md](CHANGELOG.md)。
