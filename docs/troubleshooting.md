@@ -288,6 +288,8 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 
 ## 20. 「点了卡片它直接消失、但没有跳转」：跳转成功了，可窗口没到你眼前
 
+> ⚠️ **本节描述的"可见性探测"机制已在 §23 被整层删除**（判定改为「命令有没有交给浏览器」+ AppleScript `activate`）。保留本节作为决策记录。
+
 **现象（用户报告，含条件）**：当 App 处于激活状态（点的是 Safari 页面）时能跳；但如果当时前台是别的 App（菜单栏显示 `文件/编辑/显示/窗口/帮助` 那一栏）→ 卡片直接消失，什么都没跳。
 
 **排查**：日志里那些点击**全部**是“成功”的 ——
@@ -341,3 +343,29 @@ PLAYWRIGHT_BROWSERS_PATH=.pw-browsers node test/manual/real-gui-multi-anchor.mjs
 **修法**：`Sources/dshNotifyServer/main.swift` 在 main 顶部 `signal(SIGPIPE, SIG_IGN)` —— 作为 socket 服务端，对端提前挂断绝不能杀死守护进程；写失败已被忽略，现在不再致命。探测脚本补上结尾 `\n`（并注明协议要求）。`test/socket-smoke.sh` 新增断言永久锁住这条：**发一条不带换行的请求后立刻挂断，daemon 必须仍然存活**（`PASS: daemon survives a peer that hangs up mid-request (SIGPIPE)`）。
 
 **附带收获**：这两周里 daemon 每次意外死掉都能被插件重新拉起（第 15 号 PR 的自愈逻辑），本次现场也复现了两次（PID 32114 → 32162 → 32244），并且**插件拉起的 daemon 能正常驱动 Safari、没有 `-10004`** —— 说明 Automation 授权沿 GUI server 的责任链继承，人工在终端里起 daemon 已非必需。
+
+## 23. 简化：不再探测「你看见没有」，只保证「命令发出去了」+ 直接把窗口拉到你面前
+
+**用户反馈（原话）**：「我觉得我们好像把问题搞复杂了。」—— 对的，复杂度账本如下：
+
+```
+原始需求：卡片点一下 → 跳到那次完成的位置            （小、清楚）
+你报的 bug：点了卡片它消失、没跳转                   （真问题）
+第一版修复：确认「浏览器到前台了吗」才消除卡片        （引入"验证"这个概念）
+你的观察：跳了，但抬起来的是另一个 Safari 窗口        （判据不够）
+第二版修复：CGWindowList 在屏窗口 + bounds 匹配 + 容差 + 两级升级  （复杂度爆炸）
+```
+
+爆点在于**试图探测「你到底看没看见窗口」**。这件事**本质不可知**：每个启发式都有反例（应用级可见 → 窗口级 → 容差 → `nil` 未知），于是每轮评审都能再找出一个洞。**这不是产品复杂度，是"验证的复杂度"。**
+
+**现在的做法（两态 + 一行 activate）**：
+
+1. **判据退回一个可判定信号**：`performAction` / `BrowserJumper.jump` 返回 `driven` —— 「命令有没有交给浏览器」。**不再声称任何关于"你看见了什么"的判断**（代码注释里写死这条边界，防止再滚回去）。
+2. 点击回调：`driven == true` → 消除该行/卡片；`false`（被拒/超时/open 失败）→ **保留该行** + 日志 `[cards] jump not delivered; row N kept so it can be retried`。这就是「不能无声吞掉卡片」的全部实现。
+3. **把窗口拉到你面前不用探测，用 `activate`**：AppleScript 在切/聚焦标签、`set index of hostWindow to 1` 之后调用 `activate`（旧语义：macOS 会把这个 App 的窗口带到**用户当前桌面**），并保留 `if miniaturized of hostWindow then set miniaturized of hostWindow to false`（最小化窗口先恢复）。跨桌面场景由此直接解决，零启发式、零容差、零"无法验证的分支"。
+4. **代价（如实记录）**：`activate` 可能连带把该浏览器**其它**窗口一起抬起 —— 这正是当初弃用它的原因。当前接受这个代价（「抬得太多」好过「什么都看不到」）；若日后嫌吵，加一个 `bringToFront` 开关即可（一行 config）。
+5. **日志里怎么读**：`[jump] navigated tab in Safari (delivered)` = 已交给浏览器；`[cards] jump not delivered; row N kept` = 失败保留；`[jump] automation denied ... NOT opening a new tab` = 授权被拒（此时只把浏览器唤起来，不开新标签页）。socket `debug` 回复同样带 `{"ok":true,"driven":true|false}`。
+
+**被删除的机制**（回溯用）：`WindowBounds` / `boundsMatch` / `isWindowOnScreen` / `shouldEscalateForWindow` / `visibilityVerdict` / `JumpOutcome` / `shouldDismissCard` / `bringBrowserForward` / `CGWindowListCopyWindowInfo` 查询 / 两级升级阶梯 / 激活等待与容差常量 / AppleScript 的 bounds 回报 / Chromium 回退哨兵。净减约 150 行与 2 个不可验证分支。
+
+**保留的（与前几节无关、独立成立）**：逐行锚点（§18.2）、历史翻页 seek（§18.1）、按身份删行（并发点击安全）、结果回报统一下后台队列（不卡主线程）、daemon 自愈、SIGPIPE 防护（§21）、跳转失败不吞卡片。
