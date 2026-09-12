@@ -1198,8 +1198,19 @@ final class CardStack {
     /// Reply payload mirrors the smoke test's counting style so a client can
     /// assert the effect without reading the disk snapshot.
     func clear(sessionId: String, ref: String) -> String {
-        guard let card = cards.first(where: { $0.sessionId == sessionId }) else {
-            dshLog("[clear] no card for session \(sessionId) ref=\(ref); nothing to do\n")
+        // Same rule as the merge lookup: a dismissing card is already gone for
+        // the user. Matching it here would hit a card whose rows were just
+        // emptied, answer `no-row`, and leave the target row on the NEW card
+        // (which `show` creates for the same session) forever — the amber row
+        // the user already handled would never disappear.
+        // Same rule as the merge lookup: a dismissing card is already gone for
+        // the user. Matching it here would hit a card whose rows were just
+        // emptied, answer `no-row`, and leave the target row on the NEW card
+        // (which `show` creates for the same session) forever — the amber row
+        // the user already handled would never disappear. (AI review on this PR:
+        // the 4th site of the same root cause.)
+        guard let card = cards.first(where: { $0.sessionId == sessionId && !$0.isDismissing }) else {
+            dshLog("[clear] no live card for session \(sessionId) ref=\(ref); nothing to do\n")
             return "{\"ok\":true,\"removed\":0,\"reason\":\"no-card\"}"
         }
         guard card.removeCompletion(ref: ref) != nil else {
@@ -1222,8 +1233,12 @@ final class CardStack {
 
     /// Diagnostic state (socket `state` command).
     func stateSummary() -> String {
-        let entries = cards.reduce(0) { $0 + $1.completionCount }
-        return "{\"ok\":true,\"cards\":\(cards.count),\"entries\":\(entries)}"
+        // Report what the user actually has on screen: a dismissing card is on
+        // its way out, so counting it made the diagnostics disagree with reality
+        // (and with every other lookup here).
+        let live = cards.filter { !$0.isDismissing }
+        let entries = live.reduce(0) { $0 + $1.completionCount }
+        return "{\"ok\":true,\"cards\":\(live.count),\"entries\":\(entries)}"
     }
 
     /// Show a completion. If a card for the same session already exists,

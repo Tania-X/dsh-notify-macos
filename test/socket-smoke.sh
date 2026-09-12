@@ -244,6 +244,32 @@ else
   bad "race cleanup left the stack at: $S4"
 fi
 
+# --- 同会话旧卡正在移出时，clear 必须命中新卡（否则目标行永远删不掉）---
+# 场景：旧卡被清空 → 开始移出；此时同会话又来一条琥珀行 → show 会另起新卡；
+# 用户处理完这条 → clear 必须删掉 NEW 卡上的那行（而不是空掉的旧卡 → no-row）。
+py '[{"cmd":"show","kind":"completed","sessionId":"smoke-stale","sessionTitle":"STALE","message":"one","ref":"stale:1","sound":false},
+     {"cmd":"show","kind":"completed","sessionId":"smoke-stale","sessionTitle":"STALE","message":"two","ref":"stale:2","sound":false}]' >/dev/null
+py '[{"cmd":"clear","sessionId":"smoke-stale","ref":"stale:2"}]' >/dev/null   # 1 行
+py '[{"cmd":"clear","sessionId":"smoke-stale","ref":"stale:1"}]' >/dev/null   # 0 行 → 开始移出
+# 同会话新琥珀行：应落到一张新卡上（show 已跳过 dismissing）
+py '[{"cmd":"show","kind":"blocked","sessionId":"smoke-stale","sessionTitle":"STALE","message":"handle me","ref":"stale:3","sound":false}]' >/dev/null
+C=$(py '[{"cmd":"clear","sessionId":"smoke-stale","ref":"stale:3"}]')
+if [ "$(jget "$C" removed)" = "1" ]; then
+  ok "clear reaches the NEW card while the old one is still flying out"
+else
+  bad "clear hit the dismissing card instead of the new one: $C"
+fi
+for _ in $(seq 1 15); do
+  S6=$(py '[{"cmd":"state"}]')
+  [ "$(jget "$S6" cards)" = "7" ] && [ "$(jget "$S6" entries)" = "8" ] && break
+  sleep 0.3
+done
+if [ "$(jget "$S6" cards)" = "7" ] && [ "$(jget "$S6" entries)" = "8" ]; then
+  ok "stale-card scenario left the stack at baseline"
+else
+  bad "stack after stale-card scenario: $S6"
+fi
+
 # --- 飞行期间发生 relayout，快照里不得出现 0 行的空卡 ---
 # （卡片飞出时仍留在栈里；此时任何 relayout 都会触发 persist，旧实现会把
 #   这张已经被点空、正在飞走的卡写进快照，重启后变成一张空卡）
