@@ -55,9 +55,24 @@ record("ok", "插件 peer", JSON.stringify(pluginManifest.peerDependencies ?? {}
 
 // --- 2) 事件名：从我们的代码里抽，对着官方词表核 -----------------------------
 const hostSource = read(path.join(PLUGIN_DIR, "lib", "index.js")) ?? "";
-const usedEvents = [...new Set([...hostSource.matchAll(/event\.type === "([^"]+)"/g)].map((m) => m[1]))];
+// 两种写法都要抓，否则将来只在 `switch (event.type) { case "…" }` 里新增的事件会被漏掉：
+//   1) 纯函数里的 `event.type === "…"`；
+//   2) 事件分支里的 `case "…":`（用 `/` 过滤掉同一文件里其它 switch 的标签，例如动作名 "jump-web"）。
+const usedEvents = [
+  ...new Set([
+    ...[...hostSource.matchAll(/event\.type === "([^"]+)"/g)].map((m) => m[1]),
+    ...[...hostSource.matchAll(/case "([^"]+)":/g)].map((m) => m[1]).filter((name) => name.includes("/"))
+  ])
+];
 const knownText = read(path.join(NM, "dsh-session", "lib", "types", "known-event-types.js"));
-if (!knownText) {
+if (usedEvents.length === 0) {
+  // 自保：抽取正则一旦与代码写法失配，这项检查会静默变成"永远通过" —— 那比没有检查更糟。
+  record(
+    "fail",
+    "事件词表",
+    "从 lib/index.js 抽到 0 个事件名（正则失配）—— 检查本身失效，请修 test/manual/contract-check.mjs"
+  );
+} else if (!knownText) {
   record("warn", "事件词表", "找不到 dsh-session 的 known-event-types.js，无法核对（该包结构可能变了）");
 } else {
   const known = new Set([...knownText.matchAll(/^\s*'([^']+)',/gm)].map((m) => m[1]));

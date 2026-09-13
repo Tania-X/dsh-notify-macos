@@ -8,10 +8,11 @@
 - **防御式加载（host + client 半区）**：`apply()` 外层 try/catch、`ctx.on` 能力探测、每个事件 handler 各自兜底、
   异步派发（`deliver` / `clearKeyedRow`）不再产生 unhandled rejection、日志本身失败也不会抛 ——
   契约变化时的表现是"卡片不弹"，而**不是** DSH 启动失败；
-- **契约自检** `test/manual/contract-check.mjs`：只读本机安装，5 秒核对事件词表（6 个事件名直接从
-  `lib/index.js` 抽出，脚本不会与代码漂移）、`agent/status`、`ask_user_question`、前端锚点
-  （`turn-tail` / `loadOlder`）、`sessions` 服务与 profile 接线；退出码 1 = 核心契约缺失；
-  用假树验证过它**确实能报出**契约变更（事件词表缺项 → ❌，锚点缺失 → ⚠️ 降级）；
+- **契约自检** `test/manual/contract-check.mjs`：只读本机安装，5 秒核对事件词表（事件名从
+  `lib/index.js` 抽出 —— 同时覆盖 `event.type === "…"` 与 `switch (event.type) { case "…" }`
+  两种写法，并带"抽到 0 个就判失败"的自保，避免正则失配后检查静默变成永远通过）、`agent/status`、
+  `ask_user_question`、前端锚点（`turn-tail` / `loadOlder`）、`sessions` 服务与 profile 接线；
+  退出码 1 = 核心契约缺失；用假树验证过它**确实能报出**契约变更（词表缺项 → ❌，锚点缺失 → ⚠️ 降级）；
 - **README 增「兼容性与 DSH 升级」**：声明针对版本、降级地图（哪种契约变了 → 什么症状）、
   以及升级流程摘要（停写 → 备份 → 隔离 home 试跑 → 门禁 → 提升或回滚）；
 - **peer 依赖放宽**为 `>=`（去掉上界）：预发布版本的 semver 语义会让"精确范围"变成安装噪音，
