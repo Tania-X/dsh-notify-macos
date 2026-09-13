@@ -55,6 +55,20 @@ else
   say_bad "缺少 ${SHIPPED}（用 scripts/build-universal.sh 生成并提交）"
 fi
 
+# 二进制里必须**真的**嵌着这个指纹。只比对两个文本文件是不够的：如果提交了一个陈旧的
+# 产物、却把两个文本指纹更新了，门禁会通过 —— 而用户拿到的就是"和源码对不上"的守护进程。
+# （AI 评审想象出的正是这个场景，它在本 PR 上判错了，但这个洞是真的。）
+# 二进制要按文本 grep（-a），fat 二进制里两个架构各含一份。
+if [ -f bin/dsh-notify-server ]; then
+  if LC_ALL=C grep -aq "$current" bin/dsh-notify-server; then
+    say_ok "提交的二进制里确实嵌着这个指纹"
+  else
+    say_bad "提交的二进制里没有当前指纹 —— 产物没重建（文本指纹更新了也没用）"
+  fi
+else
+  say_bad "缺少 bin/dsh-notify-server"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo
   echo "二进制与源码对不上。修法：scripts/build-universal.sh（会重新生成指纹并重建产物），"

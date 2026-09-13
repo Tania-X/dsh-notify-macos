@@ -18,7 +18,8 @@
 - **预编译二进制不再会「和源码对不上」（issue #31）**：`bin/dsh-notify-server` 里嵌**源码指纹**
   （`Sources/**` + `Package.swift` 的摘要），构建时同步写进生成的 Swift 常量与随包发布的
   `bin/dsh-notify-server.fingerprint`；新增只读诊断 `{"cmd":"build"}`（与 `peer` 同形状）、
-  CI 门禁 `scripts/fingerprint-check.sh`（纯文本比对，不需要 Swift 工具链）、以及构建脚本末尾
+  CI 门禁 `scripts/fingerprint-check.sh`（比对生成文件、随包发布文件，并 `grep -a` 直接确认**二进制里真的嵌着**该指纹；
+  纯文本操作，不需要 Swift 工具链）、以及构建脚本末尾
   「启动刚产出的二进制问一句指纹」的自检 —— 专挡 SwiftPM 缓存陈旧那种"只重建了一半"的坑
   （真实踩过）。`contract-check.mjs` 新增第 7 节：核对**正在运行的守护进程**是不是你安装的产物，
   能发现"升级后旧守护进程还在跑、你以为修复生效了其实没有"（CI 永远看不到这个）。
