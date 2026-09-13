@@ -12,6 +12,7 @@
  * 退出码：0 = 契约未变（或有降级但可用）；1 = 核心契约缺失（功能必坏）。
  */
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -156,14 +157,15 @@ record(
 
 // --- 6) profile 接线 -------------------------------------------------------
 const profilesDir = path.join(DSH_HOME, "profiles");
-let checkedProfiles = 0;
-for (const name of (() => {
+const profileNames = (() => {
   try {
     return fs.readdirSync(profilesDir);
   } catch {
     return [];
   }
-})()) {
+})();
+let checkedProfiles = 0;
+for (const name of profileNames) {
   const manifest = readJSON(path.join(profilesDir, name, "package.json"));
   if (!manifest) continue;
   checkedProfiles += 1;
@@ -179,6 +181,86 @@ for (const name of (() => {
   );
 }
 if (checkedProfiles === 0) record("warn", "profile", `在 ${profilesDir} 下没找到任何 profile`);
+
+// --- 7) 运行中的守护进程是不是你安装的那个产物（issue #31）-------------------
+// CI 永远看不到这件事：装的是新产物、跑的是旧进程（升级后旧守护进程还在），
+// 症状是"改了没生效"。做法：守护进程报告自己内嵌的源码指纹，
+// 与安装副本里随包发布的 bin/dsh-notify-server.fingerprint 比对。
+const short = (fp) => `${String(fp).slice(0, 12)}…`;
+
+const askDaemon = (sockPath, frame) =>
+  new Promise((resolve) => {
+    const sock = net.connect(sockPath);
+    let buf = "";
+    const done = (value) => {
+      sock.destroy();
+      resolve(value);
+    };
+    sock.setTimeout(1500, () => done(null));
+    sock.on("connect", () => sock.write(`${frame}\n`));
+    sock.on("data", (chunk) => {
+      buf += chunk.toString();
+      if (!buf.includes("\n")) return;
+      try {
+        done(JSON.parse(buf.trim()));
+      } catch {
+        done(null);
+      }
+    });
+    sock.on("error", () => done(null));
+    // 对端关闭却什么都没回：旧版守护进程不认识新命令时就是这个形状
+    // （processLine 的 default 分支不回复直接关连接）。不处理它，这里会一直挂着。
+    sock.on("end", () => done(null));
+    sock.on("close", () => done(null));
+  });
+
+const socketCandidates = [
+  process.env.DSH_NOTIFY_SOCKET,
+  "/tmp/dsh-notify-macos.sock",
+  path.join(os.tmpdir(), "dsh-notify-macos.sock"),
+].filter(Boolean);
+
+const installedCopies = profileNames
+  .map((name) => path.join(profilesDir, name, "node_modules", "dsh-notify-macos"))
+  .filter((dir) => fs.existsSync(dir));
+
+let daemonBuild = null;
+let socketSeen = null;
+for (const candidate of socketCandidates) {
+  if (!fs.existsSync(candidate)) continue;
+  socketSeen = candidate;
+  const reply = await askDaemon(candidate, '{"cmd":"build"}');
+  if (reply?.ok && reply.fingerprint) {
+    daemonBuild = reply.fingerprint;
+    break;
+  }
+}
+
+if (daemonBuild === null && socketSeen === null) {
+  record("warn", "daemon 指纹", "没有正在运行的守护进程（或 socket 不在候选路径上）——「旧进程还在跑」这项跳过");
+} else if (daemonBuild === null) {
+  record(
+    "warn",
+    "daemon 指纹",
+    `${socketSeen} 上有守护进程，但它没报告指纹 —— 大概率是 0.1.2 之前的版本（不认识 {\"cmd\":\"build\"}）。升级并重启 dsh 后再看`
+  );
+} else {
+  const shipped = installedCopies
+    .map((dir) => read(path.join(dir, "bin", "dsh-notify-server.fingerprint"))?.trim())
+    .filter(Boolean);
+  if (shipped.length === 0) {
+    record("warn", "daemon 指纹", `守护进程报告 ${short(daemonBuild)}，但 profile 里没有随包发布的指纹文件（更早版本的安装？）`);
+  } else if (shipped.every((fp) => fp === daemonBuild)) {
+    record("ok", "daemon 指纹", `运行中的守护进程就是你安装的那个产物（${short(daemonBuild)}）`);
+  } else {
+    record(
+      "fail",
+      "daemon 指纹",
+      `运行中的守护进程是另一个产物：进程 ${short(daemonBuild)} ≠ 安装 ${shipped.map(short).join("/")} —— ` +
+        "你把插件升级了，但旧守护进程还在跑（修复没生效）。重启 dsh 后它会退出，再跑一次本检查"
+    );
+  }
+}
 
 // --- 输出 -----------------------------------------------------------------
 const icon = { ok: "✅", warn: "⚠️ ", fail: "❌" };

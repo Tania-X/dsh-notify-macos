@@ -19,6 +19,16 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  fingerprint:
+    # 提交的 bin/ 与 Sources 是不是同一版（issue #31）。纯文本比对，不需要 Swift：
+    # Swift 构建不可复现，所以只能比指纹 —— 但"比指纹"这件事本身在 ubuntu 上就能做。
+    name: committed binary matches sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the committed binary's fingerprint against the sources
+        run: scripts/fingerprint-check.sh
+
   swift:
     # swift test needs the full XCTest toolchain (present on macOS runners).
     name: swift tests (XCTest)

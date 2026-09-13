@@ -227,6 +227,9 @@ final class SocketServer {
                 close(fd)
             }
             return true
+        case "build":
+            // 只读诊断：产物内嵌的源码指纹（见 SocketReply.build 的说明）。
+            reply(SocketReply.build(fingerprint: BuildFingerprint.value))
         case "peer":
             // 只读诊断：这条路能通，本身就说明 accept 后的对端 uid 是内核给的、
             // 且等于调用方自己的 uid（smoke 会核对）。

@@ -16,6 +16,7 @@
 | `ping` | — | 存活探测 | `{"ok":true}` |
 | `probe` | — | 守护进程健康探测 | `{"ok":true,"daemon":true}` |
 | `peer` | — | 诊断：内核认定的**连接方 uid**（不是报文里自称的身份） | `{"ok":true,"uid":501}` |
+| `build` | — | 诊断：**正在运行**的这份二进制内嵌的源码指纹（构建时写入，见 §28） | `{"ok":true,"fingerprint":"ebd718e6…"}` |
 | `state` | — | 诊断：当前卡数/行数（不含正在消失的卡片） | `{"ok":true,"cards":N,"entries":M}` |
 | `debug` | `{url, sessionId, sessionTitle?, turn?, focusOnly?}` | 手动触发一次跳转/聚焦（等价于点卡片，诊断用） | `{"ok":true,"driven":true\|false}` |
 
@@ -29,6 +30,10 @@ printf '{"cmd":"ping"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
 # 当前卡片
 printf '{"cmd":"state"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
 # → {"ok":true,"cards":2,"entries":3}
+
+# 跑着的这份二进制是哪次构建的（用来确认"装的是新产物、跑的也是新的"）
+printf '{"cmd":"build"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
+# → {"ok":true,"fingerprint":"ebd718e6…"}   与 bin/dsh-notify-server.fingerprint 应一致
 
 # 这条连接在内核眼里是谁（用来确认 peer 校验读到的是真实 uid）
 printf '{"cmd":"peer"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"

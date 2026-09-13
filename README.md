@@ -71,11 +71,16 @@ printf '{"cmd":"ping"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"   # → {"ok":
 > 两种 Mac 都能直接用。若它被 Gatekeeper 拦下（从浏览器下载的压缩包会带隔离标记）：
 > `xattr -dr com.apple.quarantine /path/to/dsh-notify-macos`。
 >
-> 想自己重新编译（改代码后，或换平台版本）：
+> 二进制里嵌了**源码指纹**（`Sources/` + `Package.swift` 的摘要），用来回答"提交的这个产物
+> 和源码是同一版吗"。所以**改完 Swift 代码请用脚本重建**（它会同步指纹）：
+>
 > ```bash
-> swift build -c release && cp .build/release/dsh-notify-server bin/   # 只编本机架构
-> scripts/build-universal.sh                                          # 编 universal 双架构
+> scripts/build-universal.sh                    # 编 universal 双架构 + 更新指纹
+> scripts/fingerprint-check.sh                  # 只想核对：提交的产物 vs 当前源码
 > ```
+>
+> 直接 `swift build -c release && cp .build/release/dsh-notify-server bin/` 会让指纹对不上
+> （CI 会红）。原因与边界见 `docs/troubleshooting.md` §28。
 
 ## 使用
 
@@ -185,7 +190,8 @@ DSH_HOME=/tmp/try-home node test/manual/contract-check.mjs   # 先在建好的�
 ```
 
 自检只读文件、5 秒出结论，会逐项列出：事件词表、`agent/status`、`ask_user_question`、
-前端锚点（`turn-tail` / `loadOlder`）、`sessions` 服务、profile 接线；退出码 1 = 有核心契约缺失。
+前端锚点（`turn-tail` / `loadOlder`）、`sessions` 服务、profile 接线，以及**正在运行的守护进程
+是不是你安装的那个产物**（升级后旧进程还在跑时，你会以为修复生效了其实没有）；退出码 1 = 有核心契约缺失。
 
 **降级地图**（升级后出问题时按这张表定位）：
 

@@ -209,6 +209,11 @@ checkEqual(SocketReply.daemon, "{\"ok\":true,\"daemon\":true}\n", "probe reply s
 checkEqual(SocketReply.badRequest, "{\"ok\":false,\"reason\":\"bad-request\"}\n", "bad-request reply shape")
 checkEqual(SocketReply.debugDriven(false), "{\"ok\":true,\"driven\":false}\n", "debug reply shape")
 checkEqual(SocketReply.peer(uid: 501), "{\"ok\":true,\"uid\":501}\n", "peer reply carries the peer uid")
+checkEqual(
+    SocketReply.build(fingerprint: "abc123"),
+    "{\"ok\":true,\"fingerprint\":\"abc123\"}\n",
+    "build reply carries the fingerprint"
+)
 checkEqual(SocketReply.terminated("{\"ok\":true}"), "{\"ok\":true}\n", "terminated adds exactly one newline")
 
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---

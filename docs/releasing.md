@@ -7,7 +7,10 @@
 
 1. **升版本**：改 `package.json` 与 `package-lock.json` 的 `version`，`CHANGELOG.md` 顶部写同一版本号；
 2. **走 PR 合进 main**：CI 会跑 vitest / XCTest / 冒烟 / Playwright + AI 评审；
-3. **需要预编译二进制时**（只有改了 Swift 代码才需要）：`scripts/build-universal.sh`，产物落到 `bin/`；
+3. **需要预编译二进制时**（只有改了 Swift 代码才需要）：`scripts/build-universal.sh`，产物落到 `bin/`，
+   并同步三处指纹（`Sources/dshNotifyCore/GeneratedBuildFingerprint.swift`、
+   `bin/dsh-notify-server.fingerprint`、嵌进二进制的值）—— **这三个文件要一起提交**，
+   否则 CI 的 `scripts/fingerprint-check.sh` 会红（见 `docs/troubleshooting.md` §28）；
 4. **建 Release**：GitHub UI 里用 tag 形如 `v0.1.1`，正文按 `CHANGELOG.md` 那一段写。
    Release 的自动源码包**自带 `bin/` 里的 universal 二进制**，朋友下载即可用，不必编译。
 
