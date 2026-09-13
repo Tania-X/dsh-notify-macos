@@ -204,6 +204,29 @@ DSH_HOME=/tmp/try-home node test/manual/contract-check.mjs   # 先在建好的�
 | `sessions.open` 改名 | 点击不跳转（卡片本身正常） | 低 |
 | `ctx.on` 等加载契约 | **插件安静降级**，DSH 照常启动 | 低（已加固：加载与 handler 都有 try/catch） |
 
+**先隔离试跑再决定**（推荐；不碰现有安装）：
+
+```bash
+# 1) 把目标版本装进独立的 DSH_HOME（npm 全局布局；npmmirror 在国内更快）
+npm install -g --prefix ~/.dsh-try --registry=https://registry.npmmirror.com \
+  @deepseek-ai/dsh@<目标版本>
+#    npm 会把包放到 ~/.dsh-try/lib/node_modules —— 搬成与现装一致的布局：
+mv ~/.dsh-try/lib/node_modules ~/.dsh-try/node_modules && rmdir ~/.dsh-try/lib
+ln -sfn ../node_modules/@deepseek-ai/dsh/lib/bin.js ~/.dsh-try/bin/dsh
+
+# 2) 把状态**复制**进去（不要动原件），并把插件 socket 改到不冲突的路径
+cp -c -R ~/.dsh/{profiles,sessions,storages,settings.yaml,.credentials.yaml} ~/.dsh-try/
+#    ~/.dsh-try/profiles/web/cordis.patch.yml 里把 socketPath 换成 /tmp/dsh-notify-try.sock
+
+# 3) 起在另一个端口，别抢 3080
+DSH_HOME=~/.dsh-try ~/.dsh-try/bin/dsh web --port 3081
+
+# 4) 自检对着隔离 home 跑（结论直接决定要不要升级）
+DSH_HOME=~/.dsh-try node test/manual/contract-check.mjs
+```
+
+`cp -c` 在 APFS 上是秒级克隆，不占额外空间；隔离 home 里会话/存储**会被新版本就地迁移**，所以务必是副本。实测结论示例（0.1.1-rc.2 → 0.1.5-rc.2）：事件词表、`agent/status`、`ask_user_question`、`sessions` 服务都还在（**卡片与点击打开会话不受影响**），但新前端**移除了 `data-chat-anchor-key` / `turn-tail`**，所以「跳到那一行」会降级为「跳到会话最新」。细节见 `docs/troubleshooting.md` §29。
+
 **升级流程**（社区维护的 [升级与回滚 handbook](https://raw.githubusercontent.com/sandbaseai/deepseek-harness-handbook/refs/heads/main/docs/en/getting-started/upgrade-and-rollback.md) 摘要）：
 先记录当前坐标并**停掉所有写进程** → 备份 `profiles/web/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,cordis.patch.yml}`、
 `$DSH_HOME/cordis.patch.yml` 与 session 数据 → 在**隔离 home** 里试目标版本 → 用上面的自检 + handbook 的门禁清单

@@ -539,3 +539,23 @@ PASS: 拒绝之后同 uid 仍然正常：{"ok":true,"uid":501}
 
 1. 改一个源码文件而不重建 → `scripts/fingerprint-check.sh` **FAIL** 并指出跑什么命令修；重建后 **PASS**；
 2. 用假 `DSH_HOME` + 新守护进程验证运行时比对的 ✅ 与 ❌ 两条路（把安装副本的指纹改成另一串 → ❌ 且给出"重启 dsh"的修法）。
+
+## 29. 升级 DSH 之前，先在隔离 home 里把目标版本跑一遍
+
+**为什么要这样**：DSH 升级会**就地迁移** `sessions/` 与 `storages/`（实测：把副本喂给 0.1.5-rc.2 后，`sessions` 从 9 个文件变 11 个、`storages` 从 3 个变 13 个，并多出 `session_projcache/`）。所以"先复制、别动原件"，且要在**另一个端口**上起，别抢正在用的 3080。命令见 README 的「兼容性与 DSH 升级」。
+
+**它回答什么问题**：目标版本装上后，**我们插件的契约还成不成立** —— 这正是每次升级唯一真正不确定的部分。
+
+**实测：0.1.1-rc.2 → 0.1.5-rc.2**（隔离 home，2026-09-13）：
+
+| 契约 | 结果 |
+| --- | --- |
+| 6 个事件名（`turn/end`、`approval/*`、`tool/*`） | ✅ 仍在新词表里 |
+| `agent/status`（完成类卡片） | ✅ 在 |
+| `ask_user_question`（提问类琥珀卡） | ✅ 在 |
+| `sessions` 服务（点击跳转依赖） | ✅ 在（新版本把 runtime 拆成几十个 `dsh-client-*` 包，`loadOlder` / `openSession` / `session.open` / `scrollTo` 都还在） |
+| `data-chat-anchor-key`、`turn-tail`（**位置锚点**） | ❌ **已移除** → 「跳到那一行」降级为「跳到会话最新」（有兜底，不崩） |
+| profile 接线 + 插件加载 | ✅ `--dump-config` 里插件仍按 id 被 patch；新版跑起来时**插件自己拉起了守护进程**（隔离 socket） |
+| 会话可用性 | ✅ 副本里的会话被新版读入并建索引（原 session id 出现在隔离 home 的 `storages/workspace.json`、`session_projcache.json` 里） |
+
+**顺带修掉自检工具的一个真缺陷**：`contract-check.mjs` 原来把包路径**写死成扁平布局**（`$DSH_HOME/node_modules/@deepseek-ai/<pkg>`），而 `npm install -g --prefix` 会把依赖嵌在主包内部（`…/dsh/node_modules/@deepseek-ai/<pkg>`）——于是在隔离 home 上把「包在别处」误报成「契约变了」（事件词表、`agent/status`、`ask_user_question`、前端锚点、`sessions` 五连 ⚠️）。自检的结论直接决定要不要升级，**误报比没有更坏**，所以改成按真实位置解析（扁平优先，其次在主包内递归查找，取不到再按文件名在包内找），并让 `sessions` 检查扫描所有 `dsh-client-*` 而不是写死 `dsh-client-runtime`（新版本里这个包已经不存在了）。改完在两种布局上都验过：现装仍 ✅ 全绿，隔离 home 只剩**一条真发现**（位置锚点）。

@@ -41,7 +41,72 @@ const readJSON = (file) => {
     return undefined;
   }
 };
-const versionOf = (pkg) => readJSON(path.join(NM, pkg, "package.json"))?.version;
+// --- 包定位：两种安装布局都要能找到 -----------------------------------------
+// DSH 至少有两种落盘布局：
+//   1) 扁平：$DSH_HOME/node_modules/@deepseek-ai/<pkg>（手工组装/本地安装，本仓库一直用这个）；
+//   2) npm 全局：$DSH_HOME/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>
+//      （`npm install -g --prefix` 会把依赖嵌在主包下面）。
+// 以前这里的路径是写死的扁平路径，于是在 npm 布局上会把「包在别处」误报成「契约变了」——
+// 自检的结论直接决定要不要升级，误报比没有更坏。所以改成按真实位置解析。
+const walkForDir = (root, name, depth) => {
+  if (depth < 0) return undefined;
+  for (const candidate of [path.join(root, name), path.join(root, "@deepseek-ai", name)]) {
+    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name === ".bin") continue;
+    // 只往 @deepseek-ai 与 node_modules 里钻：第三方几百个包跟契约无关，别浪费时间。
+    if (e.name.startsWith("@") && e.name !== "@deepseek-ai") continue;
+    const found = walkForDir(path.join(root, e.name), name, depth - 1);
+    if (found) return found;
+  }
+  return undefined;
+};
+const pkgDirCache = new Map();
+const findPkgDir = (name) => {
+  if (pkgDirCache.has(name)) return pkgDirCache.get(name);
+  const found = walkForDir(path.join(DSH_HOME, "node_modules"), name, 7);
+  pkgDirCache.set(name, found);
+  return found;
+};
+const pkgPath = (name, ...rest) => {
+  const dir = findPkgDir(name);
+  return dir ? path.join(dir, ...rest) : undefined;
+};
+const readPkg = (name, ...rest) => {
+  const file = pkgPath(name, ...rest);
+  return file ? read(file) : undefined;
+};
+/// 包内按文件名找（新版本可能在包内挪过位置，写死子路径同样会误报）。
+const findInPkg = (name, fileName) => {
+  const dir = findPkgDir(name);
+  if (!dir) return undefined;
+  const stack = [dir];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(cur, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== "node_modules") stack.push(full);
+      } else if (e.name === fileName) return full;
+    }
+  }
+  return undefined;
+};
+
+const versionOf = (pkg) => readJSON(pkgPath(pkg, "package.json") ?? "")?.version;
 
 // --- 1) 版本坐标 -----------------------------------------------------------
 const pluginManifest = readJSON(path.join(PLUGIN_DIR, "package.json")) ?? {};
@@ -65,7 +130,9 @@ const usedEvents = [
     ...[...hostSource.matchAll(/case "([^"]+)":/g)].map((m) => m[1]).filter((name) => name.includes("/"))
   ])
 ];
-const knownText = read(path.join(NM, "dsh-session", "lib", "types", "known-event-types.js"));
+const knownText = read(
+  pkgPath("dsh-session", "lib", "types", "known-event-types.js") ?? findInPkg("dsh-session", "known-event-types.js") ?? ""
+);
 if (usedEvents.length === 0) {
   // 自保：抽取正则一旦与代码写法失配，这项检查会静默变成"永远通过" —— 那比没有检查更糟。
   record(
@@ -104,7 +171,10 @@ const treeFiles = (() => {
       else if (e.name.endsWith(".js")) out.push(full);
     }
   };
-  walk(NM);
+  // 两种布局都要覆盖：扁平的在 node_modules/@deepseek-ai 下，npm 全局的在主包内部。
+  for (const root of [NM, path.join(NM, "dsh", "node_modules", "@deepseek-ai")]) {
+    if (fs.existsSync(root)) walk(root);
+  }
   return out;
 })();
 const treeHas = (needle) => {
@@ -126,8 +196,10 @@ for (const [label, needle, why] of [
 }
 
 // --- 4) 前端锚点（位置跳转依赖）--------------------------------------------
-const convClient = path.join(NM, "dsh-client-ui-conversation", "lib", "client.js");
-const convText = read(convClient);
+const convClient =
+  pkgPath("dsh-client-ui-conversation", "lib", "client.js") ??
+  findInPkg("dsh-client-ui-conversation", "client.js");
+const convText = convClient ? read(convClient) : undefined;
 if (convText === undefined) {
   record("warn", "前端锚点", "找不到 dsh-client-ui-conversation/lib/client.js（包结构可能变了）");
 } else {
@@ -146,13 +218,18 @@ if (convText === undefined) {
 }
 
 // --- 5) client 半区依赖的服务 ----------------------------------------------
-const runtimeText = read(path.join(NM, "dsh-client-runtime", "lib", "client.js")) ?? "";
+// 注意：不要只查某个固定包名 —— 新版本把 runtime 拆成了几十个 dsh-client-* 包，
+// 写死包名同样会把「挪了位置」误报成「服务消失」。
+const clientFiles = treeFiles.filter(
+  (file) => file.includes("dsh-client") && file.endsWith("client.js")
+);
+const sessionsHit = clientFiles.find((file) => (read(file) ?? "").includes("sessions"));
 record(
-  runtimeText.includes("sessions") ? "ok" : "warn",
+  sessionsHit ? "ok" : "warn",
   "前端服务 sessions",
-  runtimeText.includes("sessions")
-    ? "在 dsh-client-runtime 里出现（启发式检查）"
-    : "未出现（启发式检查）——跳转可能失效，卡片本身不受影响"
+  sessionsHit
+    ? `在 ${path.relative(DSH_HOME, sessionsHit)} 里出现（启发式检查）`
+    : `在 ${clientFiles.length} 个 client 包里都没出现（启发式检查）——跳转可能失效，卡片本身不受影响`
 );
 
 // --- 6) profile 接线 -------------------------------------------------------
