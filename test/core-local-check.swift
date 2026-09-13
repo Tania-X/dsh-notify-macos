@@ -65,6 +65,11 @@ checkEqual(loaded?.entries.count, 3, "entries survive the round trip")
 let snapshotMode = (try? FileManager.default
     .attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber
 checkEqual(snapshotMode?.intValue, 0o600, "snapshot is written 0600, not umask-default 0644")
+// 顺带钉住"不留临时文件"：save 走的是"写 0600 临时文件再 rename"，失败路径也必须清干净
+let leftovers = (try? FileManager.default.contentsOfDirectory(
+    atPath: url.deletingLastPathComponent().path
+))?.filter { $0.hasPrefix(".\(url.lastPathComponent)") && $0.hasSuffix(".tmp") } ?? []
+checkEqual(leftovers.count, 0, "no scratch file is left behind after a save")
 
 // --- 旧格式快照（条目没有 turn 键）仍要能加载 ---
 let legacyURL = FileManager.default.temporaryDirectory

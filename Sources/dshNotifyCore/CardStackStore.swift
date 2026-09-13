@@ -57,16 +57,31 @@ public final class CardStackStore {
         try? FileManager.default.moveItem(at: url, to: backup)
     }
 
-    /// Write the snapshot atomically (no torn files on crash).
+    /// Write the snapshot atomically (no torn files on crash) **and already private**.
     ///
-    /// 快照里有会话标题/路径这类内容，默认 umask 会写出 0644（同机其他用户可读），
-    /// 所以写完显式收成 0600 —— 和 socket 的信任边界保持一致。
+    /// 快照里有会话标题/路径，所以必须 0600 —— 但**不能先写完再 chmod**：
+    /// `Data.write(options: .atomic)` 是「写临时文件 → rename」，临时文件按进程 umask
+    /// 创建，于是存在一段可读窗口（改之前实测 rename 之后文件就是 0644，窗口是实锤），
+    /// 而且进程若在这两步之间被杀，文件会**永久**停在 0644。
+    ///
+    /// 做法：自己用 0600 建同目录临时文件，再 rename 覆盖 —— 权限从一出生就是对的。
+    /// rename 在同一文件系统上是原子的（不会出现半个文件）；代价是从「原子替换」变成
+    /// 「先删后改名」，中间有极短的无文件窗口 —— 读侧本来就把「缺文件」当空快照。
     public func save(_ snapshot: CardStackSnapshot) {
         guard let data = try? encoder.encode(snapshot) else { return }
-        try? data.write(to: url, options: .atomic)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: url.path
-        )
+        let manager = FileManager.default
+        let scratch = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        guard manager.createFile(
+            atPath: scratch.path, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        ) else { return }
+        do {
+            try? manager.removeItem(at: url)
+            try manager.moveItem(at: scratch, to: url)
+        } catch {
+            try? manager.removeItem(at: scratch)   // 不留垃圾，也不动既有快照
+        }
     }
 
     /// Remove the file (empty stack).

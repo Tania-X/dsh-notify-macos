@@ -69,18 +69,28 @@ final class SocketServer {
             return
         }
         var addr = fillSockaddr(path)
+        // socket 权限由 bind 时的进程 umask 决定（没有参数可传）：所以先在 bind 期间收紧
+        // umask，让它**一出生就是 0600**，而不是事后 chmod 补救（写后修正有窗口，失败还
+        // 容易被忽略）。紧接着的 chmod 只是二次确认，返回值必查。
+        let previousUmask = umask(0o177)
         let bindRc = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
                 Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        umask(previousUmask)
         guard bindRc == 0 else {
             dshLog("dsh-notify-server: bind() failed (\(bindRc))\n")
             return
         }
-        // bind 出来的 socket 权限受 umask 影响（实测 0755）：同机其他用户能连。
-        // 收成 0600 是第一道防线，真正的判定在 admit()（对端 uid）。
-        chmod(path, 0o600)
+        // 第一道防线是文件权限（0600）。它万一失效不能静默：那时只剩 admit() 的对端 uid
+        // 判定，日志里必须留下线索（不阻断启动，因为 uid 判定仍然有效）。
+        if chmod(path, 0o600) != 0 {
+            dshLog(
+                "dsh-notify-server: chmod 0600 failed (errno=\(errno)); "
+                    + "socket 权限可能仍是 umask 默认值，只剩 peer uid 校验在挡\n"
+            )
+        }
         guard listen(fd, 16) == 0 else {
             dshLog("dsh-notify-server: listen() failed\n")
             return

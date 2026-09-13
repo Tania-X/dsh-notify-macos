@@ -472,9 +472,14 @@ set index of hostWindow to 1     -- activate 会以「当前 Space 的窗口」�
 
 | 防线 | 内容 | 位置 |
 | --- | --- | --- |
-| 文件权限 | bind 之后显式 `chmod 0600` | `SocketServer.listenLoop` |
+| 文件权限 | **bind 期间收紧 umask（`umask(0o177)`）**，让 socket 一出生就是 `0600`；随后 `chmod 0600` 只作二次确认，**返回值必查**，失败记一行日志（那时只剩 uid 校验在挡，不能静默） | `SocketServer.listenLoop` |
 | 对端 uid | `getpeereid()` 取内核给出的对端 uid，与自身 uid 比对，不匹配就**直接关闭、连请求都不读** | `SocketServer.admit` + `dshNotifyCore.PeerPolicy` |
-| 快照权限 | 写完 `setAttributes([.posixPermissions: 0o600])` | `CardStackStore.save` |
+| 快照权限 | 自己用 `0600` 建同目录临时文件再 `rename` —— 权限**一出生就对** | `CardStackStore.save` |
+
+**为什么权限要"出生就对"**：第一版写的是「写完再 `chmod`」，AI 评审指出这里有窗口 —— 而它有实锤：改之前实测快照权限就是 `0644`，说明 `Data.write(options: .atomic)`（写临时文件 → rename）产出的文件确实是 umask 默认值，我的 `chmod` 是在那之后才补的；进程若在这两步之间被杀，文件就**永久**停在 `0644`。同一个坑在 socket 上一样成立（默认 `0755`）。现在两处都改成"创建时就带上正确权限"，并各配一条会真红的断言：
+
+- 快照：`attributes: nil` → `core-local-check` 报 `0644/420` FAIL；
+- socket：既不收紧 umask 也不 chmod → `socket-smoke` 报 **`socket mode is 755, want 600`** FAIL（顺带重现了原始问题）。
 
 **为什么放行 root**：root 本来就能读本进程内存、杀掉它、直接读快照 —— 拒绝它不增加任何安全性，只会在有人用 `sudo` 脚本时变成查不出原因的故障面。策略写成纯函数（`PeerPolicy.decide`）并带单测：有人把它改宽成"任何本地用户都放行"，测试会先红。
 
