@@ -31,7 +31,9 @@ public struct SocketRequestBuffer {
     public mutating func feed(_ chunk: Data) -> Data? {
         buffer.append(chunk)
         guard let index = buffer.firstIndex(of: SocketProtocol.newline) else { return nil }
-        let line = buffer[buffer.startIndex..<index]
+        // 先**显式复制**再改动 buffer：切片与 buffer 共享底层存储，虽然 Data 的 COW
+        // 会让修改自动复制（正确性没问题），但那是个隐晦的依赖 —— 这里写直白。
+        let line = Data(buffer[buffer.startIndex..<index])
         // 一个连接只处理一条请求：拿到行后就不再保留后续字节。
         buffer.removeAll(keepingCapacity: true)
         return Self.trimmed(line)
@@ -43,7 +45,7 @@ public struct SocketRequestBuffer {
     /// - Returns: 残留请求的字节，或 nil（没有残留）。
     public mutating func remainder() -> Data? {
         guard !buffer.isEmpty else { return nil }
-        let rest = buffer
+        let rest = Data(buffer)   // 同上：显式复制，不依赖 COW
         buffer.removeAll(keepingCapacity: true)
         return Self.trimmed(rest)
     }
