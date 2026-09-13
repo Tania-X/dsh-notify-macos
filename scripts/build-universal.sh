@@ -19,6 +19,21 @@ cd "$(dirname "$0")/.."
 ARM_TRIPLE=arm64-apple-macosx13.0
 X86_TRIPLE=x86_64-apple-macosx13.0
 
+# 源码指纹：写进产物（生成的 Swift 常量）并随包发布一份，用来回答"提交的二进制
+# 和源码是一起构建的吗"。Swift 构建不可复现，所以只能比指纹，不能比字节。
+# 见 scripts/source-fingerprint.sh 与 docs/troubleshooting.md §28。
+FP="$(scripts/source-fingerprint.sh)"
+echo "==> 源码指纹 ${FP:0:12}…"
+cat > Sources/dshNotifyCore/GeneratedBuildFingerprint.swift <<SWIFT
+// 自动生成，勿手改 —— 由 scripts/build-universal.sh 写入（issue #31）。
+// 值 = 本文件之外 Sources/**/*.swift 与 Package.swift 的摘要；构建产物通过
+// {"cmd":"build"} 诊断命令报告它，CI 用 scripts/fingerprint-check.sh 核对它。
+public enum BuildFingerprint {
+    public static let value = "${FP}"
+}
+SWIFT
+printf '%s\n' "$FP" > bin/dsh-notify-server.fingerprint
+
 echo "==> 编译 arm64"
 swift build -c release --triple "$ARM_TRIPLE"
 # 产物目录名不带平台版本（.build/arm64-apple-macosx/release），所以用 --show-bin-path 取真实路径，
@@ -43,3 +58,35 @@ codesign --force --sign - bin/dsh-notify-server
 echo "==> 结果"
 lipo -info bin/dsh-notify-server
 file bin/dsh-notify-server
+
+# 自检：**启动刚产出的这个二进制**，问它自己嵌的是哪个指纹。
+# 这一步专门挡"SwiftPM 缓存陈旧 / 只重建了一半"——历史上真出现过产物没带上刚修的
+# 代码，而"Build complete! (4s)"快得不正常就是当时的线索（现在由指纹直接判定）。
+if ! command -v nc >/dev/null 2>&1; then
+  echo "==> 跳过运行自检（没有 nc）"
+  exit 0
+fi
+echo "==> 自检：产物报告的指纹"
+SOCK="${TMPDIR:-/tmp}/dsh-notify-buildcheck-$$.sock"
+rm -f "$SOCK"
+./bin/dsh-notify-server "$SOCK" >/dev/null 2>&1 &
+DPID=$!
+cleanup() { kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true; rm -f "$SOCK"; }
+trap cleanup EXIT
+
+REPORTED=""
+for _ in $(seq 1 25); do
+  REPORTED=$(printf '{"cmd":"build"}\n' | nc -U "$SOCK" 2>/dev/null || true)
+  case "$REPORTED" in *"$FP"*) break ;; esac
+  sleep 0.3
+done
+case "$REPORTED" in
+  *"$FP"*)
+    echo "    OK: 产物内嵌指纹与源码一致（${REPORTED}）"
+    ;;
+  *)
+    echo "    FAIL: 产物报告的指纹与源码不一致：'$REPORTED'（期望含 ${FP:0:12}…）"
+    echo "          多半是 SwiftPM 缓存陈旧：rm -rf .build/arm64-apple-macosx .build/x86_64-apple-macosx 后重跑"
+    exit 1
+    ;;
+esac

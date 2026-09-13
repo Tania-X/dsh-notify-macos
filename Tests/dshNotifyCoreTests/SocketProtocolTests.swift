@@ -37,6 +37,13 @@ final class SocketProtocolTests: XCTestCase {
         XCTAssertEqual(text(frames.feed(data("{\"cmd\":\"ping\"}\r\n"))), "{\"cmd\":\"ping\"}")
     }
 
+    func testBuildReplyCarriesTheFingerprint() {
+        XCTAssertEqual(
+            SocketReply.build(fingerprint: "abc123"),
+            "{\"ok\":true,\"fingerprint\":\"abc123\"}\n"
+        )
+    }
+
     func testPeerReplyCarriesTheUid() {
         XCTAssertEqual(SocketReply.peer(uid: 501), "{\"ok\":true,\"uid\":501}\n")
     }

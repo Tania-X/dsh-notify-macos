@@ -84,6 +84,15 @@ public enum SocketReply {
         "{\"ok\":true,\"uid\":\(uid)}" + SocketProtocol.replyTerminator
     }
 
+    /// `build` 诊断：这份**正在运行**的二进制内嵌的源码指纹（issue #31）。
+    ///
+    /// 回答两个 CI 答不了的问题：装的是不是仓库里那个产物（比对随包发布的
+    /// `bin/dsh-notify-server.fingerprint`），以及升级之后**旧守护进程是不是还在跑**
+    /// —— 后者 CI 永远看不到，只能问运行时。
+    public static func build(fingerprint: String) -> String {
+        "{\"ok\":true,\"fingerprint\":\"\(fingerprint)\"}" + SocketProtocol.replyTerminator
+    }
+
     /// 给可能没有换行的载荷补上换行（`state` / `clear` 的载荷来自 CardStack）。
     public static func terminated(_ payload: String) -> String {
         payload.hasSuffix(SocketProtocol.replyTerminator)
