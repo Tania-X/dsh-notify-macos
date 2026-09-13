@@ -2,5 +2,5 @@
 // 值 = 本文件之外 Sources/**/*.swift 与 Package.swift 的摘要；构建产物通过
 // {"cmd":"build"} 诊断命令报告它，CI 用 scripts/fingerprint-check.sh 核对它。
 public enum BuildFingerprint {
-    public static let value = "ebd718e66c25195867589a473e3cdd7a486625aea9db8b749ba041b11a2ad0e9"
+    public static let value = "1cda40650e08ec47c3250a81ecfd2283aa4cb71f7bfad116acdda6bc6b681f77"
 }
