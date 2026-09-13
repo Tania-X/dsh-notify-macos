@@ -37,6 +37,10 @@ final class SocketProtocolTests: XCTestCase {
         XCTAssertEqual(text(frames.feed(data("{\"cmd\":\"ping\"}\r\n"))), "{\"cmd\":\"ping\"}")
     }
 
+    func testPeerReplyCarriesTheUid() {
+        XCTAssertEqual(SocketReply.peer(uid: 501), "{\"ok\":true,\"uid\":501}\n")
+    }
+
     func testOnlyTheFirstRequestIsTaken() {
         // 一个连接只处理一条请求（客户端每条命令新开连接）。
         var frames = SocketRequestBuffer()

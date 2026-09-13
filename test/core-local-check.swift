@@ -4,6 +4,7 @@
 // 手写 `"time": 1` 会得到 .corrupt）。
 //
 //   test/core-local-check.sh
+import Darwin
 import Foundation
 
 var failures = 0
@@ -59,6 +60,11 @@ let loaded = store.load().cards.first
 checkEqual(loaded?.turn, 101, "card anchor survives the round trip")
 checkEqual(loaded?.entries.map(\.turn), [101, 60, nil], "per-row anchors survive the round trip")
 checkEqual(loaded?.entries.count, 3, "entries survive the round trip")
+
+// --- 快照权限：会话标题不该被同机其他用户读到（socket 的信任边界，issue #32）---
+let snapshotMode = (try? FileManager.default
+    .attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber
+checkEqual(snapshotMode?.intValue, 0o600, "snapshot is written 0600, not umask-default 0644")
 
 // --- 旧格式快照（条目没有 turn 键）仍要能加载 ---
 let legacyURL = FileManager.default.temporaryDirectory
@@ -166,6 +172,7 @@ checkEqual(SocketReply.ping, "{\"ok\":true}\n", "ping reply shape")
 checkEqual(SocketReply.daemon, "{\"ok\":true,\"daemon\":true}\n", "probe reply shape")
 checkEqual(SocketReply.badRequest, "{\"ok\":false,\"reason\":\"bad-request\"}\n", "bad-request reply shape")
 checkEqual(SocketReply.debugDriven(false), "{\"ok\":true,\"driven\":false}\n", "debug reply shape")
+checkEqual(SocketReply.peer(uid: 501), "{\"ok\":true,\"uid\":501}\n", "peer reply carries the peer uid")
 checkEqual(SocketReply.terminated("{\"ok\":true}"), "{\"ok\":true}\n", "terminated adds exactly one newline")
 
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
@@ -179,6 +186,30 @@ checkEqual(
     "http://127.0.0.1:3080/#dsh-notify-macos/session=abc",
     "non-positive turn is dropped"
 )
+
+// --- 对端身份与准入策略（issue #32）---
+// 这些是**安全不变量**，所以本地就钉住，不等 CI：
+// 真实语义已用探针核对过 —— 非 socket fd 返回 ENOTSOCK(38)、非法/已关 fd 返回
+// EBADF(9)，且失败时 out-param 不会被写成 0（否则会退化成"当成 root 放行"）。
+func checkAccept(_ decision: PeerPolicy.Decision, _ label: String) {
+    if case .accept = decision { check(true, label) } else { check(false, label) }
+}
+func checkReject(_ decision: PeerPolicy.Decision, _ label: String) {
+    if case .reject = decision { check(true, label) } else { check(false, label) }
+}
+
+var peerPair: [Int32] = [-1, -1]
+check(socketpair(AF_UNIX, SOCK_STREAM, 0, &peerPair) == 0, "socketpair works (peer check prerequisite)")
+checkEqual(
+    PeerIdentity.uid(ofSocket: peerPair[0]), UInt32(getuid()),
+    "getpeereid returns the real peer uid (not a self-reported one)"
+)
+close(peerPair[0]); close(peerPair[1])
+check(PeerIdentity.uid(ofSocket: -1) == nil, "invalid fd yields nil, never a uid of 0 (=root)")
+checkAccept(PeerPolicy.decide(peerUid: UInt32(getuid()), daemonUid: UInt32(getuid())), "same uid is accepted")
+checkAccept(PeerPolicy.decide(peerUid: 0, daemonUid: UInt32(getuid())), "root is accepted by design")
+let strangerUid: UInt32 = UInt32(getuid()) == 999 ? 998 : 999
+checkReject(PeerPolicy.decide(peerUid: strangerUid, daemonUid: UInt32(getuid())), "another user is rejected")
 
 print(failures == 0 ? "CORE CHECK OK" : "CORE CHECK FAILED (\(failures))")
 exit(failures == 0 ? 0 : 1)

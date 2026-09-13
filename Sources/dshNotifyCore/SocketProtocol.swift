@@ -74,6 +74,16 @@ public enum SocketReply {
         "{\"ok\":true,\"driven\":\(driven)}" + SocketProtocol.replyTerminator
     }
 
+    /// `peer` 诊断：内核认定的**连接方 uid**（不是报文里自称的身份）。
+    ///
+    /// 存在的理由：拒绝路径（对端是别的 uid）在 CI 里造不出来 —— 没法凭空变出
+    /// 第二个用户。但"守护进程读到的是真实对端 uid"这件事可以测：让客户端问一句，
+    /// 答案必须等于自己的 uid。没有这个出口，peer 检查就是一段只能靠读代码相信的
+    /// 安全控制。
+    public static func peer(uid: UInt32) -> String {
+        "{\"ok\":true,\"uid\":\(uid)}" + SocketProtocol.replyTerminator
+    }
+
     /// 给可能没有换行的载荷补上换行（`state` / `clear` 的载荷来自 CardStack）。
     public static func terminated(_ payload: String) -> String {
         payload.hasSuffix(SocketProtocol.replyTerminator)

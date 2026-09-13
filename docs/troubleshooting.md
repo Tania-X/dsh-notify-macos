@@ -456,3 +456,49 @@ set index of hostWindow to 1     -- activate 会以「当前 Space 的窗口」�
 **验证状态**：属**人工验收项**（多窗口/多桌面无法自动测）—— 代码与二进制已就绪，等用户在"GUI 在另一个窗口/桌面"的场景下点一次确认。若仍无效，下一档办法是 Accessibility 的 `kAXRaiseAction`（需要额外授权），或接受此限制并在文档说明规避方式（把 GUI 固定在常用窗口）。
 
 **顺带修掉一个已发布的工具 bug**：`scripts/build-universal.sh` 用 `$TRIPLE` 去拼 SwiftPM 产物目录，而产物目录名不含平台版本（`.build/arm64-apple-macosx/release`），导致 `lipo` 阶段静默失败 —— 也就是说这个脚本从进仓库起就没跑通过。现在改用 `swift build --show-bin-path` 取真实路径。
+
+## 27. socket 谁都能连：同机其他用户能往你桌面推卡片（issue #32）
+
+**怎么发现的**：不是出事之后的复盘，而是把"守护进程暴露了什么"当成一条待查项过了一遍。实测两条：
+
+```
+755 /tmp/dsh-notify-macos.sock            # bind 出来的权限受 umask 影响 → 任何本地用户都能 connect
+644 /tmp/dsh-notify-macos.sock.cards.json # 快照里有会话标题/路径 → 任何本地用户都能读
+```
+
+**为什么这值得修**：守护进程能渲染任意内容的卡片，且点卡片会用 AppleScript 驱动你的浏览器。同机其他普通用户若能连上，就能往你的桌面推卡片（钓鱼/骚扰），并借**你的**权限让浏览器跳转 —— 一个"只服务本用户"的进程没有理由接受别人的连接。
+
+**三道防线**：
+
+| 防线 | 内容 | 位置 |
+| --- | --- | --- |
+| 文件权限 | bind 之后显式 `chmod 0600` | `SocketServer.listenLoop` |
+| 对端 uid | `getpeereid()` 取内核给出的对端 uid，与自身 uid 比对，不匹配就**直接关闭、连请求都不读** | `SocketServer.admit` + `dshNotifyCore.PeerPolicy` |
+| 快照权限 | 写完 `setAttributes([.posixPermissions: 0o600])` | `CardStackStore.save` |
+
+**为什么放行 root**：root 本来就能读本进程内存、杀掉它、直接读快照 —— 拒绝它不增加任何安全性，只会在有人用 `sudo` 脚本时变成查不出原因的故障面。策略写成纯函数（`PeerPolicy.decide`）并带单测：有人把它改宽成"任何本地用户都放行"，测试会先红。
+
+**为此新增的命令**：`{"cmd":"peer"}` → `{"ok":true,"uid":501}`（内核认定的连接方 uid，只读诊断）。存在的理由是**让安全控制可验证**：拒绝路径需要真实的第二个 uid，CI 里造不出来；但"守护进程读到的是真实对端 uid"可以测 —— 客户端问一句，答案必须等于自己的 uid。顺带也解决了"为什么我的客户端被拒"这类排查。
+
+**验证**（`test/manual/peer-reject.sh`，需要无密码 sudo）：
+
+```
+PASS: socket 是 0600（默认 umask 会给出 0755）
+PASS: 同 uid 正常：{"ok":true,"uid":501}
+PASS: 已放开为 0666，接下来只有 uid 判定在挡
+PASS: uid=70 的 ping 没有回复（连接被直接关闭，请求没进解析器）
+PASS: 被拒的 show 没有落地（state={"ok":true,"cards":0,"entries":0}）
+PASS: 日志里留下了本次的拒绝记录（/tmp/dsh-notify-macos.log）
+PASS: 拒绝之后同 uid 仍然正常：{"ok":true,"uid":501}
+```
+
+脚本先把 socket `chmod 0666`，让"文件权限"不再是解释 —— 这样剩下的 PASS/FAIL 只可能由 uid 判定决定。
+
+**这一步抓出的两类"假证据"**（都是先做了咬合验证才现形的）：
+
+1. **断言本身无齿**：最初用 `{"cmd":"show"}` 当探针，断言"对端没拿到回复"。但 `show` 是 fire-and-forget，**被接受**时也没有回复 —— 把 uid 判定临时短路后这条断言照样 PASS。改成会回复的 `ping`（短路版立刻红：`竟然拿到了回复：{"ok":true}`）；
+2. **日志证据会粘住**：`tail -40 日志 | grep 拒绝` 在短路版也 PASS，因为上一次运行的拒绝记录还在文件里。改成只查**本次新增**的那一段（按运行前的字节数偏移）。
+
+**另一个真实缺陷**：拒绝行最初用 `print` 写，而守护进程的诊断日志走 `dshLog`（固定文件 `/tmp/dsh-notify-macos.log`）。守护进程是被插件 spawn 的，stdout 是块缓冲的，**进程被信号杀掉时缓冲区直接丢** —— 实测"拒绝了陌生 uid"这件事在日志里查无实据。现在 `SocketServer` 的所有诊断都走 `dshLog`。
+
+**协议不变**：只新增一个只读诊断命令 `peer`（见 `docs/protocol.md`）；既有的请求/回复形状一个都没动。

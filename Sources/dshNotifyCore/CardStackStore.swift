@@ -58,9 +58,15 @@ public final class CardStackStore {
     }
 
     /// Write the snapshot atomically (no torn files on crash).
+    ///
+    /// 快照里有会话标题/路径这类内容，默认 umask 会写出 0644（同机其他用户可读），
+    /// 所以写完显式收成 0600 —— 和 socket 的信任边界保持一致。
     public func save(_ snapshot: CardStackSnapshot) {
         guard let data = try? encoder.encode(snapshot) else { return }
         try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: url.path
+        )
     }
 
     /// Remove the file (empty stack).

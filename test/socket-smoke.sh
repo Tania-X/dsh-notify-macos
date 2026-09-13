@@ -97,6 +97,28 @@ else
   bad "state mismatch: $S1"
 fi
 
+# --- 信任边界（issue #32）：只服务本用户，且内核给的对端 uid 是真的 ---
+# 拒绝路径造不出来（CI 里没有第二个 uid），但"读到的是真实对端 uid"可以：
+# 让客户端问一句 peer，答案必须等于自己的 uid。
+PEER=$(py '[{"cmd":"peer"}]')
+if [ "$(jget "$PEER" uid)" = "$(id -u)" ]; then
+  ok "peer reports the kernel-reported uid of this connection ($(id -u))"
+else
+  bad "peer uid mismatch: $PEER (expected $(id -u))"
+fi
+SMODE=$(stat -f "%Lp" "$SOCK" 2>/dev/null)
+if [ "$SMODE" = "600" ]; then
+  ok "socket mode is 600 (was 755 before: any local user could connect)"
+else
+  bad "socket mode is $SMODE, want 600"
+fi
+CMODE=$(stat -f "%Lp" "$CARDS" 2>/dev/null)
+if [ "$CMODE" = "600" ]; then
+  ok "snapshot mode is 600 (session titles stay with this user)"
+else
+  bad "snapshot mode is $CMODE, want 600"
+fi
+
 # --- the turn anchor must be persisted (position-indexed jump survives restart) ---
 if grep -q '"turn" : 5\|"turn": 5\|"turn" : 5' "$CARDS" 2>/dev/null || grep -q '"turn"' "$CARDS" 2>/dev/null; then
   ok "turn anchor persisted in the snapshot"
