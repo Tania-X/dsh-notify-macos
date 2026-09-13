@@ -1,5 +1,21 @@
 # 变更记录
 
+## 0.1.4 — 2026-09-13
+
+**失败的任务不再补一张绿卡**（实机反馈）：任务失败时先出红卡，随后又冒出一张"任务已完成"。
+
+- **根因**：两张卡来自**两个不同的信号** —— 失败卡是 `session/event` 的 `turn/end`（带 error reason），
+  完成卡是 `agent/status` 的 `running → idle`。后者只知道"这一批 turn 排空了"，
+  **并不知道这批是成功还是失败**，于是同一轮既红又绿（实测日志：`kind=error turn=3` 紧跟 `kind=completed turn=3`）；
+- **修法**：记住"本轮是否以失败收场"，agent 回到 idle 时若本轮失败过就**不发完成卡**；
+  **作废时机是"agent 回到 idle"**（不是 `turn/start`）—— 一个 agent 跨多个排队 turn 保持
+  `running`，同批里 turn 3 失败后 turn 4 会立刻 `turn/start`，在那里清标记会让整批排空时又补绿卡（评审抓到的路径）；
+- **新增** `test/error-no-green.integration.test.js`（3 条，真 unix socket + 假 daemon，驱动真实 `apply()`）：
+  失败轮只发红卡、干净轮照发出绿卡、失败之后的下一轮绿卡要回来。**咬合验证**：把抑制逻辑去掉，
+  断言立刻从 `['error']` 变成 `['error','completed']` —— 正是用户看到的现象。
+
+细节与边界（含"为什么 amber 的 blocked→completed 不该一起掐"）见 `docs/troubleshooting.md` §31。
+
 ## 0.1.3 — 2026-09-13
 
 **跳转不再和你抢滚动条**：这是实机反馈的体验缺陷 —— 点卡片跳过去之后，最长 6~8 秒内

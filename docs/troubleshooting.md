@@ -582,3 +582,38 @@ PASS: 拒绝之后同 uid 仍然正常：{"ok":true,"uid":501}
 **验证**：新增 `test/client-scroll.test.js`（7 条，这块以前零覆盖）。用假 DOM 装出真实场景（滚动容器会被写 `scrollTop`、`scrollHeight` 持续增长模拟分页、用户中途 `wheel`／方向键／触摸）。**咬牙实测**：把"接管就停手"短路掉，同一场景在用户滚动后仍被强行写 **51** 次 `scrollTop`（正是用户描述的手感），断言立刻变红；其中一条断言还先证明"没到位时确实在持续校正"，否则"停手"断言会因为压根没动而假通过。
 
 **顺带提醒（本次踩的）**：新用例第一版假件的 `scrollTop` setter 没有像浏览器那样**钳到最大可滚动值**，于是"是否到底"的判定失真、断言基于了真实页面不存在的状态 —— 假件也要和真实语义对齐。
+
+## 31. 任务失败后，又冒出一张绿色的「任务已完成」（实机反馈）
+
+**用户反馈**：红色的 fail 卡片出现之后，最终还会带一张绿色的完成卡。
+
+**日志里的现场**（`/tmp/dsh-notify-macos.log`）：
+
+```
+[show] kind=error      session=… turn=2
+[show] kind=error      session=… turn=3
+[show] kind=completed  session=… turn=3      ← 同一轮，又绿了
+```
+
+**根因**：两张卡来自**两个独立信号**，谁也不知道对方：
+
+| 卡片 | 触发信号 | 它知道什么 |
+| --- | --- | --- |
+| 红（error） | `session/event` 的 `turn/end`，reason.kind ∈ {error, aborted, interrupted, max-tokens} | 这一 turn 失败了 |
+| 绿（completed） | `agent/status` 的 `running → idle` | 这一批 turn **排空了**（却不知道排空的原因是成功还是失败） |
+
+完成卡这条信号本来是有意选的：一个 agent 会跨多个排队 turn 保持 `running`，排空回 `idle` 才恰好代表"一轮对话结束"，这样多个 turn 只会弹一张卡。代价就是它**不带结局信息** —— 失败时于是既红又绿。
+
+**修法**（`lib/index.js`）：按会话记住"本轮是否以失败收场"：
+
+- `turn/end` 判定为 error → 记下该会话本轮失败 + 照常弹红卡；
+- `agent/status` 回到 idle 时 → 若本轮失败过就**不发完成卡**；无论失败与否都在这里清掉记录（下一轮照常）；
+- `turn/start` → **故意什么都不做**。这里是最容易写错的地方：一个 agent 跨多个排队 turn 保持 `running`，
+  同一批里 turn 3 失败后 turn 4 会立刻 `turn/start` —— 若在那里清标记，整批排空时又会补一张绿卡
+  （本 PR 的第一版就是这么写的，被评审抓到）。**作废时机必须跟着"一轮"的粒度走，也就是 idle。**
+
+**为什么 amber 的 `blocked → completed` 不一起掐**：那不是重复。用户回答完 `ask_user_question`（或授权）之后，agent 会继续跑完这一轮 —— 此时补一张"任务已完成"是**正确的**；而如果用户拒绝授权导致这一轮失败，`turn/end` 会带 error，走上面的抑制路径。
+
+**验证**：新增 `test/error-no-green.integration.test.js`（3 条，真 unix socket + 假 daemon，驱动真实 `apply()`）。**咬合验证**：把抑制逻辑短路掉，断言立刻从 `['error']` 变成 `['error','completed']`（就是用户看到的现象）；「干净的一轮照发绿卡」和「失败之后的下一轮绿卡要回来」两条保证没有把正常路径一起掐死、也没有把失败状态粘住。
+
+**一个前提**：这套判断依赖"`turn/end` 先于 agent 回到 idle"。按事件语义这是必然的（turn 不结束，这一批就排不空）；若哪天在日志里看到反序（先绿后红），说明这个前提变了，应当改成在 idle 处短暂等待/延迟判定，而不是继续加状态。
