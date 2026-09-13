@@ -24,15 +24,41 @@ import dshNotifyCore
 
 // MARK: - Diagnostics
 
+/// 守护进程日志的固定路径（不随 socketPath 走，见 docs/protocol.md）。
+let dshLogPath = "/tmp/dsh-notify-macos.log"
+
+/// 把日志文件权限收成 0600 —— 在 main 里**显式调用一次**。
+///
+/// 日志里有会话标题、session id、深链 URL（`[cards] skipping empty card <标题>` 就是其一），
+/// 和快照同一个信任边界，不该给同机其他用户读。老版本已经建出 0644 的文件，所以除了
+/// "新建时就 0600"，还要把既有文件收紧一次。
+///
+/// 为什么不用 `private let x: Void = { ... }()` 这种"lazy 全局只跑一次"的写法：实测过，
+/// **没被引用的声明照样会被初始化**（只删调用点 → 日志权限仍变成 600；把声明整块删掉 →
+/// 保持 644，inode 未变，是 chmod 不是重建）。它能工作，但那是我说不清、也不该依赖的
+/// 语言行为 —— 显式调用，读到的人一眼知道它什么时候跑。
+func tightenLogPermissions() {
+    if chmod(dshLogPath, 0o600) != 0 && errno != ENOENT {
+        // 收不紧也要留痕：日志本身的内容就是排查依据，不能静默。
+        FileHandle.standardError.write(
+            Data("dsh-notify-server: chmod 0600 on \(dshLogPath) failed (errno=\(errno))\n".utf8)
+        )
+    }
+}
+
 /// Append one diagnostic line to the daemon log.
 func dshLog(_ line: String) {
-    let path = "/tmp/dsh-notify-macos.log"
-    if let handle = FileHandle(forWritingAtPath: path) {
+    let data = Data(line.utf8)
+    if let handle = FileHandle(forWritingAtPath: dshLogPath) {
         handle.seekToEndOfFile()
-        handle.write(Data(line.utf8))
+        handle.write(data)
         try? handle.close()
     } else {
-        try? Data(line.utf8).write(to: URL(fileURLWithPath: path))
+        // 新建时就 0600（默认 umask 会是 0644）：权限出生就对，不靠事后补救。
+        _ = FileManager.default.createFile(
+            atPath: dshLogPath, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        )
     }
 }
 
@@ -1329,6 +1355,9 @@ signal(SIGPIPE, SIG_IGN)
 if daemonAlreadyRunning(socketPath) {
     exit(0)
 }
+
+// 诊断日志含会话标题/id，和快照同一个信任边界：启动就把权限收好（含老版本留下的 0644）。
+tightenLogPermissions()
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)

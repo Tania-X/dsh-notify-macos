@@ -65,34 +65,74 @@ final class SocketServer {
         unlink(path)
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            print("dsh-notify-server: socket() failed")
+            dshLog("dsh-notify-server: socket() failed\n")
             return
         }
         var addr = fillSockaddr(path)
+        // socket 权限由 bind 时的进程 umask 决定（没有参数可传）：所以先在 bind 期间收紧
+        // umask，让它**一出生就是 0600**，而不是事后 chmod 补救（写后修正有窗口，失败还
+        // 容易被忽略）。紧接着的 chmod 只是二次确认，返回值必查。
+        let previousUmask = umask(0o177)
         let bindRc = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
                 Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        umask(previousUmask)
         guard bindRc == 0 else {
-            print("dsh-notify-server: bind() failed (\(bindRc))")
+            dshLog("dsh-notify-server: bind() failed (\(bindRc))\n")
             return
         }
+        // 第一道防线是文件权限（0600）。它万一失效不能静默：那时只剩 admit() 的对端 uid
+        // 判定，日志里必须留下线索（不阻断启动，因为 uid 判定仍然有效）。
+        if chmod(path, 0o600) != 0 {
+            dshLog(
+                "dsh-notify-server: chmod 0600 failed (errno=\(errno)); "
+                    + "socket 权限可能仍是 umask 默认值，只剩 peer uid 校验在挡\n"
+            )
+        }
         guard listen(fd, 16) == 0 else {
-            print("dsh-notify-server: listen() failed")
+            dshLog("dsh-notify-server: listen() failed\n")
             return
         }
         while running {
             let client = accept(fd, nil, nil)
             if client >= 0 {
+                guard let peerUid = admit(client: client) else {
+                    close(client)  // 拒绝时连读都不读：对方的数据不进入解析器
+                    continue
+                }
                 DispatchQueue.global(qos: .userInitiated).async { [self] in
-                    handle(client: client)
+                    handle(client: client, peerUid: peerUid)
                 }
             }
         }
     }
 
-    private func handle(client: Int32) {
+    /// 只服务同一个用户（以及 root）。判定逻辑在 Core 的 PeerPolicy，这里只接内核。
+    ///
+    /// 诊断一律走 `dshLog`（固定日志文件）而不是 `print`：守护进程是被插件 spawn 的，
+    /// stdout 是块缓冲的，进程被信号杀掉时缓冲区直接丢 —— 曾经"拒绝了陌生 uid"这件事
+    /// 因此在日志里查无实据（实测过）。
+    /// 放行时返回内核给出的对端 uid（`peer` 诊断与后续日志都用这一个值，不重算）。
+    private func admit(client: Int32) -> UInt32? {
+        guard let peerUid = PeerIdentity.uid(ofSocket: client) else {
+            // 拿不到身份就当不可信：不猜、不放行（uid 的 out-param 在失败时是未定义的，
+            // 直接用它等于把陌生人当 root）。
+            dshLog("dsh-notify-server: getpeereid() 失败，拒绝连接 (errno=\(errno))\n")
+            return nil
+        }
+        switch PeerPolicy.decide(peerUid: peerUid, daemonUid: UInt32(getuid())) {
+        case .accept:
+            // 正常路径不打日志：每次连接都记一行只会把有用信息淹掉。
+            return peerUid
+        case .reject(let reason):
+            dshLog("dsh-notify-server: \(reason)\n")
+            return nil
+        }
+    }
+
+    private func handle(client: Int32, peerUid: UInt32) {
         // 分帧逻辑在 Core（SocketRequestBuffer）：一个连接一条请求、换行结尾、
         // 对端提前关闭时残留内容仍要处理 —— 这些都是有测试的不变量。
         var frames = SocketRequestBuffer()
@@ -119,7 +159,7 @@ final class SocketServer {
         }
         var deferred = false
         if let request {
-            deferred = processLine(request, replyTo: client)
+            deferred = processLine(request, replyTo: client, peerUid: peerUid)
         }
         if !deferred { close(client) }
     }
@@ -127,7 +167,7 @@ final class SocketServer {
     /// Handle one request. Returns true when the reply is written
     /// asynchronously (the caller must then leave the fd open).
     @discardableResult
-    private func processLine(_ data: Data, replyTo fd: Int32) -> Bool {
+    private func processLine(_ data: Data, replyTo fd: Int32, peerUid: UInt32) -> Bool {
         // Write a reply (one JSON line) back to the client.
         func reply(_ text: String) {
             text.withCString { ptr in
@@ -187,6 +227,10 @@ final class SocketServer {
                 close(fd)
             }
             return true
+        case "peer":
+            // 只读诊断：这条路能通，本身就说明 accept 后的对端 uid 是内核给的、
+            // 且等于调用方自己的 uid（smoke 会核对）。
+            reply(SocketReply.peer(uid: peerUid))
         case "probe":
             // Health check: the daemon is up. (Browser automation probing was
             // removed — session jumps now use a hash deep link opened with the

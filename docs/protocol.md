@@ -15,6 +15,7 @@
 | `clear` | `{sessionId, ref}` | 用户已在 GUI 里处理掉 `ref` 对应的授权/提问 → 删掉那一行（删空则整卡消失，剩一行自动折叠） | `{"ok":true,"removed":0\|1,"remaining":N,"reason?":"no-card"\|"no-row"}` |
 | `ping` | — | 存活探测 | `{"ok":true}` |
 | `probe` | — | 守护进程健康探测 | `{"ok":true,"daemon":true}` |
+| `peer` | — | 诊断：内核认定的**连接方 uid**（不是报文里自称的身份） | `{"ok":true,"uid":501}` |
 | `state` | — | 诊断：当前卡数/行数（不含正在消失的卡片） | `{"ok":true,"cards":N,"entries":M}` |
 | `debug` | `{url, sessionId, sessionTitle?, turn?, focusOnly?}` | 手动触发一次跳转/聚焦（等价于点卡片，诊断用） | `{"ok":true,"driven":true\|false}` |
 
@@ -28,6 +29,10 @@ printf '{"cmd":"ping"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
 # 当前卡片
 printf '{"cmd":"state"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
 # → {"ok":true,"cards":2,"entries":3}
+
+# 这条连接在内核眼里是谁（用来确认 peer 校验读到的是真实 uid）
+printf '{"cmd":"peer"}\n' | nc -U "$TMPDIR/dsh-notify-macos.sock"
+# → {"ok":true,"uid":501}   （501 = 你自己的 uid；换个用户来连会被直接拒绝）
 
 # 手动跳一次（会真的驱动浏览器）
 printf '{"cmd":"debug","url":"http://127.0.0.1:3080","sessionId":"<会话 id>","turn":42}\n' \
@@ -53,6 +58,26 @@ python3 test/manual/push-anchors.py "$TMPDIR/dsh-notify-macos.sock" <会话 id> 
 | `[cards] jump not delivered; row N kept so it can be retried` | 跳转没交出去 → 卡片保留（不会无声消失） |
 | `[cards] snapshot loaded/restored …` | daemon 重启后的卡片恢复 |
 | `[activate] …` | 抬窗口过程（评估"抬起来的窗口对不对"时看这行） |
+
+## 信任边界（谁能连这个 socket）
+
+守护进程**只服务同一个用户**（以及 root，见下）：socket 上的每一次连接都先用
+`getpeereid()` 取内核给出的对端 uid，与守护进程自身 uid 比对，不是自己人就立刻关闭 ——
+**连请求都不读**（对方的数据不进入解析器），并在 `/tmp/dsh-notify-macos.log` 记一行
+`拒绝 uid=… 的连接`。
+
+要挡的是同机其他普通用户：他们若能连上，就能往你的桌面推任意内容的卡片，并借你的权限
+让浏览器跳转。三道防线：
+
+| 防线 | 内容 |
+| --- | --- |
+| socket 权限 | bind 之后显式 `chmod 0600`（默认受 umask 影响，实测会是 `0755`） |
+| 对端 uid | `getpeereid()` + `PeerPolicy`（`Sources/dshNotifyCore/PeerPolicy.swift`），**协议不变** |
+| 快照权限 | `<socketPath>.cards.json` 写为 `0600`（里面有会话标题/路径，默认会是 `0644`） |
+
+放行 root 是**有意的**：root 本来就能读本进程内存、杀掉它、直接读快照，拒绝它不增加任何
+安全性，只会在有人用 `sudo` 脚本时变成查不出原因的故障面。策略写成纯函数并带单测，
+改宽（比如"任何本地用户都放行"）会先让测试变红。
 
 ## 单实例与生命周期
 
