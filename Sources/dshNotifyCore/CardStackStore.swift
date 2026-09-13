@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// JSON file store for the card-stack snapshot.
@@ -64,9 +65,13 @@ public final class CardStackStore {
     /// 创建，于是存在一段可读窗口（改之前实测 rename 之后文件就是 0644，窗口是实锤），
     /// 而且进程若在这两步之间被杀，文件会**永久**停在 0644。
     ///
-    /// 做法：自己用 0600 建同目录临时文件，再 rename 覆盖 —— 权限从一出生就是对的。
-    /// rename 在同一文件系统上是原子的（不会出现半个文件）；代价是从「原子替换」变成
-    /// 「先删后改名」，中间有极短的无文件窗口 —— 读侧本来就把「缺文件」当空快照。
+    /// 做法：自己用 0600 建同目录临时文件，再用 POSIX `rename(2)` **原子覆盖**目标 ——
+    /// 权限从一出生就是对的，不会出现半个文件，也不会丢既有快照。
+    ///
+    /// 为什么不用 `FileManager.moveItem`：目标存在时它会失败，于是得"先删再改名"，
+    /// 中间那段窗口里旧快照已删、新快照未就位 —— `moveItem` 再失败就**彻底丢快照**
+    /// （评审指出这点是对的；原实现 `Data.write(options: .atomic)` 反而不会丢）。
+    /// `rename` 没有这个问题：覆盖是原子的，失败时旧文件完好。
     public func save(_ snapshot: CardStackSnapshot) {
         guard let data = try? encoder.encode(snapshot) else { return }
         let manager = FileManager.default
@@ -76,11 +81,9 @@ public final class CardStackStore {
             atPath: scratch.path, contents: data,
             attributes: [.posixPermissions: 0o600]
         ) else { return }
-        do {
-            try? manager.removeItem(at: url)
-            try manager.moveItem(at: scratch, to: url)
-        } catch {
-            try? manager.removeItem(at: scratch)   // 不留垃圾，也不动既有快照
+        if rename(scratch.path, url.path) != 0 {
+            // 覆盖失败：清掉本次临时文件，**既有快照原样保留**（宁可旧也不要没有）。
+            try? manager.removeItem(at: scratch)
         }
     }
 

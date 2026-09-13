@@ -70,6 +70,37 @@ let leftovers = (try? FileManager.default.contentsOfDirectory(
     atPath: url.deletingLastPathComponent().path
 ))?.filter { $0.hasPrefix(".\(url.lastPathComponent)") && $0.hasSuffix(".tmp") } ?? []
 checkEqual(leftovers.count, 0, "no scratch file is left behind after a save")
+// 连续保存两次：目标必须被**原地覆盖**。这里钉的是"先删后改名"那个坑 ——
+// FileManager.moveItem 在目标存在时会失败，于是失败路径会把旧快照一起丢掉；
+// rename(2) 是原子覆盖，失败时旧文件完好（评审 🟩 指出，属实）。
+store.save(CardStackSnapshot(cards: [
+    SnapshotCard(
+        sessionId: "s2", sessionTitle: "T2", action: "jump-web", path: nil, url: nil,
+        autoDismissSec: nil, turn: 7, expanded: false,
+        entries: [SnapshotEntry(message: "z", time: t0, kind: "error", detail: nil, index: 1, turn: 7)]
+    )
+]))
+checkEqual(store.load().cards.first?.sessionId, "s2", "a second save overwrites the snapshot in place")
+checkEqual(
+    ((try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber)?.intValue,
+    0o600, "the overwritten snapshot is still 0600"
+)
+// 覆盖失败那条分支也要被执行到：目标不可被覆盖时，**旧状态必须保留、临时文件不能留**。
+// （拿一个目录占住目标路径，rename 会失败 —— 旧实现"先 removeItem 再 moveItem"会把
+// 这个目录直接删掉，所以这条断言在旧实现下是红的。）
+let blockedURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("dsh-core-check-blocked-\(UUID().uuidString)")
+defer { try? FileManager.default.removeItem(at: blockedURL) }
+try? FileManager.default.createDirectory(at: blockedURL, withIntermediateDirectories: true)
+let blockedStore = CardStackStore(url: blockedURL)
+blockedStore.save(CardStackSnapshot(cards: []))
+var isDir: ObjCBool = false
+let stillThere = FileManager.default.fileExists(atPath: blockedURL.path, isDirectory: &isDir)
+check(stillThere && isDir.boolValue, "a failed overwrite leaves the existing target untouched")
+let blockedLeftovers = (try? FileManager.default.contentsOfDirectory(
+    atPath: blockedURL.deletingLastPathComponent().path
+))?.filter { $0.hasPrefix(".\(blockedURL.lastPathComponent)") } ?? []
+checkEqual(blockedLeftovers.count, 0, "a failed overwrite leaves no scratch file behind")
 
 // --- 旧格式快照（条目没有 turn 键）仍要能加载 ---
 let legacyURL = FileManager.default.temporaryDirectory
