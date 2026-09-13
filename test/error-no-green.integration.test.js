@@ -145,6 +145,28 @@ describe.skipIf(process.platform !== "darwin")("失败的一轮不该再补绿�
     expect(shows[0].turn).toBe(4);   // 锚点仍指向刚结束的那一轮
   });
 
+  it("同一批里失败之后还有下一个 turn：仍然只发红卡（评审指出的路径）", async () => {
+    // 这批的关键：turn 3 失败后 turn 4 立刻 turn/start，而 agent 全程保持 running
+    // （从未回到 idle）。若在 turn/start 处清标记，整批排空时就会又补一张绿卡。
+    const daemon = await fakeDaemon();
+    const { ctx, handlers } = fakeCtx();
+    apply(ctx, configFor(daemon.socketPath));
+
+    handlers["session/event"](session, { type: "turn/start", data: { turn: 3 } });
+    handlers["session/event"](session, {
+      type: "turn/end",
+      data: { turn: 3, reason: { kind: "error", error: { message: "boom" } } }
+    });
+    handlers["session/event"](session, { type: "turn/start", data: { turn: 4 } });
+    handlers["session/event"](session, { type: "turn/end", data: { turn: 4 } });
+    handlers["agent/status"]({ agent, status: "running" });
+    handlers["agent/status"]({ agent, status: "idle" });
+    await daemon.waitFor("show", 1);
+    const frames = await daemon.settle();
+
+    expect(frames.filter((f) => f.cmd === "show").map((f) => f.kind)).toEqual(["error"]);
+  });
+
   it("失败之后的下一轮成功：绿卡要回来（旧的失败结局必须及时作废）", async () => {
     const daemon = await fakeDaemon();
     const { ctx, handlers } = fakeCtx();
