@@ -173,6 +173,36 @@ npm run test:e2e                  # client 半区 Playwright（自带 harness �
 
 CI（`.github/workflows/tests.yml`）：ubuntu 跑 vitest + Playwright，macos-15 跑 `swift test` + Core 自检 + 真 socket 集成测试。
 
+## 兼容性与 DSH 升级
+
+**针对版本**：本插件针对 **DSH `0.1.1-rc.2`** 开发与验证（`peerDependencies` 声明了 `@deepseek-ai/dsh-agent` / `dsh-session-title` / `cordis`；它们只是**适配声明**，运行时由宿主提供）。
+
+DSH 升级有可能改动插件依赖的契约。**升级前先跑自检**：
+
+```bash
+node test/manual/contract-check.mjs                 # 检查本机安装（默认 $DSH_HOME）
+DSH_HOME=/tmp/try-home node test/manual/contract-check.mjs   # 先在建好的隔离 home 里试目标版本
+```
+
+自检只读文件、5 秒出结论，会逐项列出：事件词表、`agent/status`、`ask_user_question`、
+前端锚点（`turn-tail` / `loadOlder`）、`sessions` 服务、profile 接线；退出码 1 = 有核心契约缺失。
+
+**降级地图**（升级后出问题时按这张表定位）：
+
+| 契约变了 | 症状 | 严重度 |
+| --- | --- | --- |
+| 事件名（`turn/end`、`approval/*`、`tool/*`） | 对应类型的卡片**静默不再出现** | 中（不崩） |
+| `agent/status` running→idle | 完成类卡片不再出现 | 中（不崩） |
+| `ask_user_question` 改名 | 提问类琥珀卡不再出现 | 低 |
+| 前端锚点（`turn-tail`、`loadOlder`） | 位置跳转降级为"钉最新" | 低（有兜底） |
+| `sessions.open` 改名 | 点击不跳转（卡片本身正常） | 低 |
+| `ctx.on` 等加载契约 | **插件安静降级**，DSH 照常启动 | 低（已加固：加载与 handler 都有 try/catch） |
+
+**升级流程**（社区维护的 [升级与回滚 handbook](https://raw.githubusercontent.com/sandbaseai/deepseek-harness-handbook/refs/heads/main/docs/en/getting-started/upgrade-and-rollback.md) 摘要）：
+先记录当前坐标并**停掉所有写进程** → 备份 `profiles/web/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,cordis.patch.yml}`、
+`$DSH_HOME/cordis.patch.yml` 与 session 数据 → 在**隔离 home** 里试目标版本 → 用上面的自检 + handbook 的门禁清单
+（干净启动 / 组合图只有已知变化 / session 恢复 / 插件按固定坐标加载 / 关闭时资源释放）→ 通过才提升，失败按备份回滚。
+
 ## 平台与许可
 
 - 仅 macOS。守护进程用 Swift 5.9+ / SwiftPM 编译；仓库内附 **universal（Apple Silicon + Intel）** 预编译二进制（构建方式见 `scripts/build-universal.sh`）。
