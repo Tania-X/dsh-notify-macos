@@ -800,6 +800,11 @@ enum BrowserJumper {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 
+    /// 注意脚本里的 **两处** `set index of hostWindow to 1`：`activate` 会把该 App
+    /// 「当前 Space 的那个窗口」带到前面，可能盖掉 activate 之前设的窗口顺序，所以
+    /// activate 之后再置顶一次。实测（用户报告）：只有一处时，抬起的是当前桌面的
+    /// 那个 Safari 窗口，而不是 GUI 所在的那个。
+    ///
     /// Focus the browser window/tab already showing `guiUrl` (no URL change —
     /// used for a card that is waiting on the user's approval/answer already
     /// on screen). Raises that tab's window inside the app, then activates the
@@ -825,6 +830,7 @@ enum BrowserJumper {
                 set current tab of hostWindow to targetTab
                 set index of hostWindow to 1
                 activate
+                set index of hostWindow to 1
               else
                 error "dsh-no-tab"
               end if
@@ -852,6 +858,7 @@ enum BrowserJumper {
                 set active tab index of hostWindow to (index of targetTab)
                 set index of hostWindow to 1
                 activate
+                set index of hostWindow to 1
               else
                 error "dsh-no-tab"
               end if
@@ -897,6 +904,7 @@ enum BrowserJumper {
                 set current tab of hostWindow to targetTab
                 set index of hostWindow to 1
                 activate
+                set index of hostWindow to 1
               else
                 error "dsh-no-tab"
               end if
@@ -926,6 +934,7 @@ enum BrowserJumper {
               set active tab index of hostWindow to (index of targetTab)
               set index of hostWindow to 1
               activate
+              set index of hostWindow to 1
               try
                 execute targetTab javascript \(asString("location.href = \(asString(targetURL));"))
               on error

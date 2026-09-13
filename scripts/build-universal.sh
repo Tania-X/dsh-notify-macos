@@ -21,14 +21,21 @@ X86_TRIPLE=x86_64-apple-macosx13.0
 
 echo "==> 编译 arm64"
 swift build -c release --triple "$ARM_TRIPLE"
+# 产物目录名不带平台版本（.build/arm64-apple-macosx/release），所以用 --show-bin-path 取真实路径，
+# 而不是拿 triple 去拼 —— 拼错过一次，脚本静默失败在 lipo 那一步。
+ARM_BIN="$(swift build -c release --triple "$ARM_TRIPLE" --show-bin-path)"
+
 echo "==> 编译 x86_64（交叉）"
 swift build -c release --triple "$X86_TRIPLE"
+X86_BIN="$(swift build -c release --triple "$X86_TRIPLE" --show-bin-path)"
 
 echo "==> lipo 合成"
+echo "    arm64 : $ARM_BIN/dsh-notify-server"
+echo "    x86_64: $X86_BIN/dsh-notify-server"
 lipo -create \
   -output bin/dsh-notify-server \
-  ".build/$ARM_TRIPLE/release/dsh-notify-server" \
-  ".build/$X86_TRIPLE/release/dsh-notify-server"
+  "$ARM_BIN/dsh-notify-server" \
+  "$X86_BIN/dsh-notify-server"
 
 echo "==> ad-hoc 签名（lipo 会让原签名失效）"
 codesign --force --sign - bin/dsh-notify-server
