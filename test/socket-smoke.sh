@@ -118,6 +118,13 @@ if [ "$CMODE" = "600" ]; then
 else
   bad "snapshot mode is $CMODE, want 600"
 fi
+# 日志同样含会话标题/session id（[cards] skipping empty card <标题>），也在 /tmp 里
+LMODE=$(stat -f "%Lp" /tmp/dsh-notify-macos.log 2>/dev/null)
+if [ "$LMODE" = "600" ]; then
+  ok "daemon log mode is 600 (it carries session titles too)"
+else
+  bad "daemon log mode is $LMODE, want 600"
+fi
 
 # --- the turn anchor must be persisted (position-indexed jump survives restart) ---
 if grep -q '"turn" : 5\|"turn": 5\|"turn" : 5' "$CARDS" 2>/dev/null || grep -q '"turn"' "$CARDS" 2>/dev/null; then
