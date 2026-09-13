@@ -146,6 +146,28 @@ let refStore = CardStackStore(url: refURL)
 refStore.save(refSnapshot)
 checkEqual(refStore.load().cards.first?.entries.first?.ref, "approval:a9", "blocked ref survives a restart")
 
+// --- socket 协议纯逻辑：分帧（§21 事故的根源）与 socket 级回复 ---
+var frames = SocketRequestBuffer()
+check(frames.feed(Data("{\"cmd\":\"ping\"}".utf8)) == nil, "no newline yet: nothing framed")
+checkEqual(String(decoding: frames.feed(Data("\n".utf8))!, as: UTF8.self), "{\"cmd\":\"ping\"}", "newline completes the frame")
+var split = SocketRequestBuffer()
+check(split.feed(Data("{\"cmd\":".utf8)) == nil, "partial chunk buffered")
+checkEqual(String(decoding: split.feed(Data("\"state\"}\n".utf8))!, as: UTF8.self), "{\"cmd\":\"state\"}", "frame split across two reads")
+var crlf = SocketRequestBuffer()
+checkEqual(String(decoding: crlf.feed(Data("{\"a\":1}\r\n".utf8))!, as: UTF8.self), "{\"a\":1}", "CRLF tolerated")
+var leftover = SocketRequestBuffer()
+_ = leftover.feed(Data("{\"cmd\":\"ping\"}".utf8))
+checkEqual(String(decoding: leftover.remainder()!, as: UTF8.self), "{\"cmd\":\"ping\"}", "peer closed without newline: remainder still processed")
+var nothing = SocketRequestBuffer()
+check(nothing.remainder() == nil, "no remainder when nothing buffered")
+var multi = SocketRequestBuffer()
+checkEqual(String(decoding: multi.feed(Data("{\"a\":1}\n{\"b\":2}\n".utf8))!, as: UTF8.self), "{\"a\":1}", "one request per connection: only the first line")
+checkEqual(SocketReply.ping, "{\"ok\":true}\n", "ping reply shape")
+checkEqual(SocketReply.daemon, "{\"ok\":true,\"daemon\":true}\n", "probe reply shape")
+checkEqual(SocketReply.badRequest, "{\"ok\":false,\"reason\":\"bad-request\"}\n", "bad-request reply shape")
+checkEqual(SocketReply.debugDriven(false), "{\"ok\":true,\"driven\":false}\n", "debug reply shape")
+checkEqual(SocketReply.terminated("{\"ok\":true}"), "{\"ok\":true}\n", "terminated adds exactly one newline")
+
 // --- 深链：turn 才带上 &turn=，非法 turn 丢弃 ---
 checkEqual(
     JumpLink.url(base: "http://127.0.0.1:3080", sessionId: "abc", turn: 60),
