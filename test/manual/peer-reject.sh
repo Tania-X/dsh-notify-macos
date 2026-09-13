@@ -25,11 +25,8 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $1"; }
 
 cleanup() {
-  # kill 之后要 wait：否则 shell 退出时会打印一行 "Terminated"，看起来像构建/检查失败
-  if [ -n "${DPID:-}" ]; then
-    kill "$DPID" 2>/dev/null || true
-    wait "$DPID" 2>/dev/null || true
-  fi
+  [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
+  sleep 0.3
   rm -f "$SOCK" "$PROBE"
 }
 trap cleanup EXIT
