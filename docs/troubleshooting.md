@@ -438,3 +438,21 @@ dismiss 是**动画**：卡片要等动画结束才从栈里移除，于是存�
 
 - **原因**：需要新增 client→host 的 RPC 通道（`connection.rpc.call` ↔ `ctx.connection.rpc.handle`，类型在 `dsh-client-connection` 的 `rpc.d.ts` 里，但未在运行时验证过），再加上"什么算手动触底 / 什么算看过"的一套语义判定（程序化滚动要排除、进入会话时本来就在底部不算、多会话该清谁……）。收益只是"少一张卡"，复杂度明显不划算 —— 与 §23「不再探测用户看见没有」是同一个教训。
 - **现在的契约**：success/fail 卡片**保持原样** —— 点它跳转（并移除该行）、往右拖拽清整张；用户自己看、自己清。琥珀卡片的自动清理（§24）不受影响，仍然只在"你已处理"时触发。
+
+## 26. 点卡片时抬起的是「当前桌面的那个浏览器窗口」，不是 GUI 所在的那个
+
+**用户反馈（实机）**：点卡片后导航确实生效（日志 `[navigate] … tab updated` → `[jump] navigated tab in Safari (delivered)`），但**被抬到前面的却是当前桌面的另一个 Safari 窗口**，GUI 所在的那个仍在后面 —— 手动切过去能看到确实跳好了。
+
+**原因**：脚本里原本的顺序是「`set index of hostWindow to 1` → `activate`」。`set index` 只在 App **内部**给窗口排序，而 macOS 的 `activate` 会把该 App 在**当前 Space** 的那个窗口带到前面，于是刚设的顺序被盖掉。这正是 §20/§23 讨论过的"哪个窗口会被抬起来"在 macOS 上的实际行为。
+
+**修法**：`activate` **之后再置顶一次**（四处脚本：Safari/Chromium × 导航/聚焦）：
+
+```applescript
+set index of hostWindow to 1
+activate
+set index of hostWindow to 1     -- activate 会以「当前 Space 的窗口」优先，这里再盖回来
+```
+
+**验证状态**：属**人工验收项**（多窗口/多桌面无法自动测）—— 代码与二进制已就绪，等用户在"GUI 在另一个窗口/桌面"的场景下点一次确认。若仍无效，下一档办法是 Accessibility 的 `kAXRaiseAction`（需要额外授权），或接受此限制并在文档说明规避方式（把 GUI 固定在常用窗口）。
+
+**顺带修掉一个已发布的工具 bug**：`scripts/build-universal.sh` 用 `$TRIPLE` 去拼 SwiftPM 产物目录，而产物目录名不含平台版本（`.build/arm64-apple-macosx/release`），导致 `lipo` 阶段静默失败 —— 也就是说这个脚本从进仓库起就没跑通过。现在改用 `swift build --show-bin-path` 取真实路径。
